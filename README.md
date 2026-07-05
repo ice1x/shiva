@@ -58,6 +58,31 @@ volume across restarts. To receive real GitHub webhooks later (task `00003`),
 set `WEBHOOK_URL` in `.env` to a tunnel URL (ngrok/cloudflared) that forwards
 to `localhost:5678`.
 
+## Workflow as Code
+
+The n8n workflow is generated, not hand-built. Sources of truth:
+
+- [`shiva.config.yml`](shiva.config.yml) — review categories (enabled ones end up in the prompt)
+- [`src/shiva_agent/review.py`](src/shiva_agent/review.py) — diff filtering and prompt assembly (unit-tested, embedded verbatim into the Code node)
+- [`scripts/build_workflow.py`](scripts/build_workflow.py) — assembles [`workflows/pr_review.json`](workflows/pr_review.json)
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+.venv/bin/pytest                              # run unit tests
+.venv/bin/python scripts/build_workflow.py    # regenerate workflows/pr_review.json
+# import into the running n8n container:
+docker cp workflows/pr_review.json shiva-n8n:/tmp/pr_review.json
+docker exec shiva-n8n n8n import:workflow --input=/tmp/pr_review.json
+```
+
+The imported workflow (`Shiva PR Review Agent`) wires: GitHub PR Webhook →
+Fetch PR Files → Filter Diff & Build Prompt (Python Code node) → Claude Review
+(`claude-opus-4-8`, adaptive thinking) → Post PR Comment. Before it can run
+end-to-end you still need to attach credentials in the n8n UI (task `00002`):
+an HTTP Header Auth credential `Authorization: Bearer <GitHub PAT>` on the two
+GitHub nodes and `x-api-key: <Anthropic API key>` on the Claude node, plus a
+tunnel `WEBHOOK_URL` for real webhooks (task `00003`).
+
 ## Task List
 
 Ordered by priority (highest first). Check off as you go.
