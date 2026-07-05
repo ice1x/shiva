@@ -26,7 +26,8 @@ def test_has_expected_nodes(workflow):
     types = [n["type"] for n in workflow["nodes"]]
     assert "n8n-nodes-base.webhook" in types
     assert types.count("n8n-nodes-base.httpRequest") == 3  # fetch files, LLM, post comment
-    assert "n8n-nodes-base.code" in types
+    assert types.count("n8n-nodes-base.code") == 2  # check skip, build prompt
+    assert "n8n-nodes-base.if" in types
 
 
 def test_nodes_are_connected_in_a_chain(workflow):
@@ -41,8 +42,49 @@ def test_nodes_are_connected_in_a_chain(workflow):
     assert len(connections) == len(workflow["nodes"]) - 1
 
 
+def test_skip_check_runs_before_any_github_call(workflow):
+    """00010: draft / skip-review PRs are dropped before Fetch PR Files."""
+    connections = workflow["connections"]
+    check = connections["GitHub PR Webhook"]["main"][0][0]["node"]
+    assert check == "Check Skip Conditions"
+    assert connections["Check Skip Conditions"]["main"][0][0]["node"] == "Skip Draft & Labeled PRs?"
+    if_branches = connections["Skip Draft & Labeled PRs?"]["main"]
+    assert if_branches[0][0]["node"] == "Fetch PR Files"  # true branch: continue
+    assert if_branches[1] == []  # false branch: stop, no review
+
+
+def test_check_skip_node_embeds_tested_predicate(workflow):
+    check = next(n for n in workflow["nodes"] if n["name"] == "Check Skip Conditions")
+    script = check["parameters"]["pythonCode"]
+    assert check["parameters"]["language"] == "python"
+    assert "def should_skip_pr(" in script
+    assert "skip-review" in script
+    # the reviewable-action allowlist must travel with the predicate
+    assert "REVIEWABLE_ACTIONS" in script
+    assert "ready_for_review" in script
+    # the webhook body must be passed through for downstream $json.body expressions
+    assert '"body"' in script
+
+
+def test_if_node_routes_on_computed_skip_flag(workflow):
+    if_node = node_by_type(workflow, "n8n-nodes-base.if")[0]
+    conditions = if_node["parameters"]["conditions"]["conditions"]
+    assert len(conditions) == 1
+    assert conditions[0]["leftValue"] == "={{ $json.skip }}"
+    assert conditions[0]["operator"] == {"type": "boolean", "operation": "false", "singleValue": True}
+
+
+def test_python_nodes_use_native_runner_api(workflow):
+    """n8n's native Python task runner exposes `_items` only; `_input` is
+    the removed Pyodide API and fails at runtime with NameError."""
+    for node in node_by_type(workflow, "n8n-nodes-base.code"):
+        script = node["parameters"]["pythonCode"]
+        assert "_items" in script, node["name"]
+        assert "_input" not in script, node["name"]
+
+
 def test_code_node_embeds_only_enabled_categories(workflow):
-    code = node_by_type(workflow, "n8n-nodes-base.code")[0]
+    code = next(n for n in workflow["nodes"] if n["name"] == "Filter Diff & Build Prompt")
     script = code["parameters"]["pythonCode"]
     for name in [
         "Structural Review",
