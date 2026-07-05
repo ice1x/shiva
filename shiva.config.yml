@@ -1,0 +1,92 @@
+# Shiva PR Review Agent — review category configuration.
+#
+# This file is the default configuration and the reference schema. A target
+# repository can override it by placing its own `.shiva.yml` at the repo root
+# (task 00014); repo config is merged over these defaults by category `id`.
+#
+# Each category:
+#   id:      unique slug, used for merging/overriding
+#   name:    human-readable name, used in review output headings
+#   enabled: whether the category is included in the review prompt
+#   prompt:  instruction block injected into the LLM review prompt
+#
+# Custom categories are first-class: add a new entry with your own id/name/
+# prompt (see the commented example at the bottom).
+
+version: 1
+
+categories:
+  - id: structural
+    name: Structural Review
+    enabled: true
+    prompt: >
+      Focus on the architecture and design of the code. Ensure that the code
+      is organized logically and follows best practices for structure.
+
+  - id: logical
+    name: Logical Review
+    enabled: true
+    prompt: >
+      Examine the logic and algorithms used in the code. Check for
+      correctness and efficiency of the implemented logic.
+
+  - id: behavioral
+    name: Behavioral Review
+    enabled: true
+    prompt: >
+      Look at how the code behaves in different scenarios. Ensure that the
+      code meets the functional requirements and handles edge cases properly.
+
+  - id: security
+    name: Security Review
+    enabled: true
+    prompt: >
+      Examine the code for potential security vulnerabilities. Ensure that
+      the code follows best practices for security and data protection.
+
+  - id: performance
+    name: Performance Review
+    enabled: true
+    prompt: >
+      Analyze the code for performance issues. Ensure that the code is
+      optimized for speed and resource usage.
+
+  - id: code-style
+    name: Code Style Review
+    enabled: false
+    prompt: >
+      Ensure that the code adheres to the project's coding standards and
+      style guidelines. Check for consistency in naming conventions,
+      indentation, and formatting.
+
+  - id: docstrings-comments
+    name: Docstrings and Comments Review
+    enabled: false
+    prompt: >
+      Review the documentation within the code, such as docstrings and
+      comments. Ensure that the code is well-documented and that comments
+      are clear and helpful.
+
+  - id: messages
+    name: Messages Review
+    enabled: false
+    prompt: >
+      Focus on the clarity and helpfulness of messages, such as error
+      messages and log outputs. Ensure that messages are informative and
+      aid in debugging and understanding the code.
+
+  - id: test-coverage
+    name: Test Coverage Review
+    enabled: false
+    prompt: >
+      Review the tests associated with the code. Ensure that the code is
+      adequately tested and that tests cover various scenarios and edge
+      cases.
+
+  # Custom category example — uncomment and adapt:
+  # - id: i18n
+  #   name: Internationalization Review
+  #   enabled: true
+  #   prompt: >
+  #     Check that all user-facing strings go through the translation layer
+  #     and no hardcoded locale-specific formatting is introduced.
