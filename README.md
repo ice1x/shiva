@@ -16,11 +16,24 @@ Build a minimal, working code-review agent in n8n as fast as possible and start 
 
 Out of scope for MVP: multi-file looping, agentic tool use, draft/label filtering, CI integration.
 
+## Run n8n locally
+
+```bash
+# optional: cp .env.example .env and adjust port/timezone/webhook URL
+docker compose up -d
+open http://localhost:5678   # editor UI (first load shows owner setup)
+```
+
+Data (workflows, credentials, SQLite DB) persists in the `n8n_data` Docker
+volume across restarts. To receive real GitHub webhooks later (task `00003`),
+set `WEBHOOK_URL` in `.env` to a tunnel URL (ngrok/cloudflared) that forwards
+to `localhost:5678`.
+
 ## Task List
 
 Ordered by priority (highest first). Check off as you go.
 
-- [ ] `00001` — Run n8n locally (Docker or `npx n8n`) and open the editor UI
+- [x] `00001` — Run n8n locally (Docker or `npx n8n`) and open the editor UI — see [Run n8n locally](#run-n8n-locally)
 - [ ] `00002` — Create a GitHub personal access token and add it as a credential in n8n
 - [ ] `00003` — Add a Webhook / GitHub Trigger node and receive a real `pull_request opened` event from a pet project repo
 - [ ] `00004` — Add an HTTP Request node to fetch changed files/diff from `GET /repos/{owner}/{repo}/pulls/{number}/files`
