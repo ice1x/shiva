@@ -10,7 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.12"]
+        # 3.10 = requires-python floor (n8n's Python Code node runs Pyodide ~3.11,
+        # so the embedded review.py must stay compatible with older runtimes);
+        # 3.14 = current stable.
+        python-version: ["3.10", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
