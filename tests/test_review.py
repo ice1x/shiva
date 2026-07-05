@@ -5,6 +5,7 @@ from shiva_agent.review import (
     build_review_prompt,
     filter_files,
     load_enabled_categories,
+    should_skip_pr,
 )
 
 fake = Faker()
@@ -68,6 +69,66 @@ class TestFilterFiles:
         removed = make_file("old.py", status="removed")
         kept = filter_files([removed, make_file("new.py")])
         assert [f["filename"] for f in kept] == ["new.py"]
+
+
+def make_pr_payload(draft=False, labels=(), action="opened"):
+    return {
+        "action": action,
+        "pull_request": {
+            "number": fake.random_int(min=1, max=999),
+            "title": fake.sentence(),
+            "draft": draft,
+            "labels": [{"name": name} for name in labels],
+        },
+        "repository": {"full_name": f"{fake.user_name()}/{fake.word()}"},
+    }
+
+
+class TestShouldSkipPr:
+    def test_reviews_regular_open_pr(self):
+        assert should_skip_pr(make_pr_payload()) is False
+
+    def test_skips_draft_pr(self):
+        assert should_skip_pr(make_pr_payload(draft=True)) is True
+
+    def test_skips_pr_labeled_skip_review(self):
+        payload = make_pr_payload(labels=[fake.word(), "skip-review"])
+        assert should_skip_pr(payload) is True
+
+    def test_reviews_pr_with_other_labels(self):
+        payload = make_pr_payload(labels=[fake.word(), fake.word()])
+        assert should_skip_pr(payload) is False
+
+    def test_skip_label_is_exact_match(self):
+        payload = make_pr_payload(labels=["skip-review-later", "no-skip-review"])
+        assert should_skip_pr(payload) is False
+
+    def test_custom_skip_label(self):
+        payload = make_pr_payload(labels=["no-bots"])
+        assert should_skip_pr(payload, skip_label="no-bots") is True
+
+    @pytest.mark.parametrize("action", ["opened", "reopened", "ready_for_review", "synchronize"])
+    def test_reviews_reviewable_actions(self, action):
+        assert should_skip_pr(make_pr_payload(action=action)) is False
+
+    @pytest.mark.parametrize("action", ["closed", "labeled", "unlabeled", "edited", "assigned"])
+    def test_skips_non_reviewable_actions(self, action):
+        # These fire full reviews (paid LLM call + duplicate comment) if not gated.
+        assert should_skip_pr(make_pr_payload(action=action)) is True
+
+    def test_skips_ping_and_non_pr_events(self):
+        # GitHub's initial webhook 'ping' has no action and no pull_request;
+        # without a guard it would render /pulls/undefined/files and 404.
+        assert should_skip_pr({"zen": "Keep it simple.", "hook_id": 1}) is True
+        assert should_skip_pr({}) is True
+
+    def test_tolerates_missing_fields(self):
+        # Reviewable action but degenerate pull_request must not raise.
+        assert should_skip_pr({"action": "opened"}) is False
+        assert should_skip_pr({"action": "opened", "pull_request": {}}) is False
+        assert should_skip_pr(
+            {"action": "opened", "pull_request": {"draft": None, "labels": None}}
+        ) is False
 
 
 class TestBuildReviewPrompt:

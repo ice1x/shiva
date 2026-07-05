@@ -60,6 +60,12 @@ volume across restarts. To receive real GitHub webhooks later (task `00003`),
 set `WEBHOOK_URL` in `.env` to a tunnel URL (ngrok/cloudflared) that forwards
 to `localhost:5678`.
 
+Compose starts two containers: `shiva-n8n` (the editor/engine) and
+`shiva-n8n-runners` (the task-runner sidecar that executes Code-node
+scripts). The sidecar is required: the stock n8n image ships no Python, so
+without it every Python Code node fails with "Python runner unavailable".
+Both images must be on the same version.
+
 ## Workflow as Code
 
 The n8n workflow is generated, not hand-built. Sources of truth:
@@ -78,8 +84,11 @@ docker exec shiva-n8n n8n import:workflow --input=/tmp/pr_review.json
 ```
 
 The imported workflow (`Shiva PR Review Agent`) wires: GitHub PR Webhook →
+Check Skip Conditions (Python Code node) → Skip Draft & Labeled PRs? (IF) →
 Fetch PR Files → Filter Diff & Build Prompt (Python Code node) → Claude Review
-(`claude-opus-4-8`, adaptive thinking) → Post PR Comment. Before it can run
+(`claude-opus-4-8`, adaptive thinking) → Post PR Comment. Draft PRs and PRs
+labeled `skip-review` end at the IF gate without any GitHub or LLM calls
+(task `00010`). Before it can run
 end-to-end you still need to attach credentials in the n8n UI (task `00002`):
 an HTTP Header Auth credential `Authorization: Bearer <GitHub PAT>` on the two
 GitHub nodes and `x-api-key: <Anthropic API key>` on the Claude node, plus a
@@ -98,7 +107,7 @@ Ordered by priority (highest first). Check off as you go.
 - [ ] `00007` — Add a GitHub node to post the LLM output as a comment on the PR
 - [ ] `00008` — End-to-end test: open a PR with intentionally flawed code and verify the review comment appears
 - [ ] `00009` — Start using it: enable the workflow on 1–2 active pet project repos
-- [ ] `00010` — Add an IF node to skip draft PRs and PRs labeled `skip-review`
+- [x] `00010` — Add an IF node to skip draft PRs and PRs labeled `skip-review`
 - [ ] `00011` — Handle large PRs: split diffs per file and review in a Loop node
 - [ ] `00012` — Tune the review prompt based on real feedback quality (add repo conventions, severity levels, output format)
 - [ ] `00013` — Experiment with the AI Agent node + tools so the model can request extra repo files for context

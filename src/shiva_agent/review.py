@@ -6,6 +6,28 @@ dependency-free (standard library only) and self-contained.
 """
 
 DEFAULT_MAX_PATCH_CHARS = 15_000
+SKIP_REVIEW_LABEL = "skip-review"
+# pull_request actions that carry a diff worth reviewing. Everything else
+# (closed/labeled/edited/..., and non-PR deliveries like the initial 'ping')
+# is skipped so we neither 404 on a missing PR number nor pay for a duplicate
+# review on every label change.
+REVIEWABLE_ACTIONS = frozenset({"opened", "reopened", "ready_for_review", "synchronize"})
+
+
+def should_skip_pr(payload, skip_label=SKIP_REVIEW_LABEL):
+    """Return True when the webhook event must not be reviewed.
+
+    Skips non-reviewable actions and non-PR events (the `action` is absent or
+    not in REVIEWABLE_ACTIONS), draft PRs, and PRs carrying the opt-out label.
+    `payload` is the GitHub webhook event body.
+    """
+    if payload.get("action") not in REVIEWABLE_ACTIONS:
+        return True
+    pr = payload.get("pull_request") or {}
+    if pr.get("draft"):
+        return True
+    labels = pr.get("labels") or []
+    return any(label.get("name") == skip_label for label in labels)
 
 
 def load_enabled_categories(config):
