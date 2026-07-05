@@ -16,6 +16,31 @@ Build a minimal, working code-review agent in n8n as fast as possible and start 
 
 Out of scope for MVP: multi-file looping, agentic tool use, draft/label filtering, CI integration.
 
+## Review Categories
+
+The agent reviews code against a set of **configurable categories**. Each
+category can be enabled or disabled per repository, and the review prompt is
+assembled from the enabled categories only. For the MVP the configuration
+lives in the workflow (a Code node / workflow variable); later it can move to
+a per-repo config file (e.g. `.shiva.yml`) so each project chooses its own
+set.
+
+| # | Category | What it covers |
+|---|----------|----------------|
+| 1 | **Structural** | Architecture and design of the code: logical organization, best practices for structure |
+| 2 | **Logical** | Logic and algorithms: correctness and efficiency of the implemented logic |
+| 3 | **Behavioral** | Behavior in different scenarios: functional requirements are met, edge cases handled properly |
+| 4 | **Code Style** | Adherence to the project's coding standards and style guidelines: naming conventions, indentation, formatting consistency |
+| 5 | **Docstrings & Comments** | In-code documentation: docstrings present and accurate, comments clear and helpful |
+| 6 | **Messages** | Clarity and helpfulness of error messages and log outputs: informative, aid debugging and understanding |
+| 7 | **Security** | Potential security vulnerabilities: best practices for security and data protection |
+| 8 | **Performance** | Performance issues: code optimized for speed and resource usage |
+| 9 | **Test Coverage** | Tests associated with the code: adequate coverage of various scenarios and edge cases |
+
+Default set for the MVP: Logical, Behavioral, Security (highest
+signal-to-noise on small PRs); the rest are opt-in until the prompt is tuned
+(task `00012`).
+
 ## Run n8n locally
 
 ```bash
@@ -38,7 +63,7 @@ Ordered by priority (highest first). Check off as you go.
 - [ ] `00003` — Add a Webhook / GitHub Trigger node and receive a real `pull_request opened` event from a pet project repo
 - [ ] `00004` — Add an HTTP Request node to fetch changed files/diff from `GET /repos/{owner}/{repo}/pulls/{number}/files`
 - [ ] `00005` — Add a Code node: filter target files (e.g. `.py` only), skip oversized diffs, concatenate into a single prompt-ready string
-- [ ] `00006` — Add an LLM node (or HTTP Request to the API) with a review prompt covering bugs, style, and security issues
+- [ ] `00006` — Add an LLM node (or HTTP Request to the API) with a review prompt assembled from the enabled [review categories](#review-categories)
 - [ ] `00007` — Add a GitHub node to post the LLM output as a comment on the PR
 - [ ] `00008` — End-to-end test: open a PR with intentionally flawed code and verify the review comment appears
 - [ ] `00009` — Start using it: enable the workflow on 1–2 active pet project repos
@@ -46,6 +71,7 @@ Ordered by priority (highest first). Check off as you go.
 - [ ] `00011` — Handle large PRs: split diffs per file and review in a Loop node
 - [ ] `00012` — Tune the review prompt based on real feedback quality (add repo conventions, severity levels, output format)
 - [ ] `00013` — Experiment with the AI Agent node + tools so the model can request extra repo files for context
+- [ ] `00014` — Make review categories configurable per repo (e.g. a `.shiva.yml` in the target repo selecting categories from the [list](#review-categories))
 
 ## Definition of Done (MVP)
 
