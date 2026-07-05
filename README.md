@@ -1,5 +1,7 @@
 # n8n PR Review Agent (MVP)
 
+[![CI](https://github.com/ice1x/shiva/actions/workflows/ci.yml/badge.svg)](https://github.com/ice1x/shiva/actions/workflows/ci.yml)
+
 ## Goal
 
 Build a minimal, working code-review agent in n8n as fast as possible and start using it on local pet projects. When a Pull Request is opened, n8n fetches the diff, sends it to an LLM with a review prompt, and posts the result back as a PR comment.
