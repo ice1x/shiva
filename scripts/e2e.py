@@ -159,8 +159,8 @@ def load_config() -> dict:
     return yaml.safe_load((REPO_ROOT / "shiva.config.yml").read_text())
 
 
-def resolve_llm_provider(repo: str) -> str | None:
-    """Provider name the config's llm_by_repo mapping resolves to for ``repo``.
+def resolve_llm_provider(repo: str | None = None) -> str | None:
+    """Provider the config resolves to for ``repo`` (or the default when None).
 
     Lets the driver pick the right per-provider API-key env var. Returns None if
     the config can't be read (the caller falls back to the generic key).
@@ -428,6 +428,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
         resolve_token(required=not args.dry_run),
         dry_run=args.dry_run,
         workflow_path=args.workflow,
+        # Resolve the LLM key by the workflow's provider: --repo if given, else
+        # the config default. Without this a hosted `setup` can't find its key.
+        llm_provider=resolve_llm_provider(args.repo),
     )
     return 0
 
@@ -565,7 +568,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("smoke", parents=[common], help="local deterministic webhook + skip-gate check")
     sub.add_parser("check", help="verify every mapped hosted LLM provider has an API key")
-    sub.add_parser("setup", parents=[common, wf], help="import credential + workflow and activate")
+    setup = sub.add_parser("setup", parents=[common, wf], help="import credential + workflow and activate")
+    setup.add_argument("--repo", default=None,
+                       help="resolve the LLM key by this repo's provider (else the config default)")
 
     live = sub.add_parser("live", parents=[common, wf], help="full end-to-end run against a real repo")
     live.add_argument("--repo", default="ice1x/graphbook", help="owner/name target repo")
