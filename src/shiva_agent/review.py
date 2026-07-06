@@ -106,7 +106,7 @@ class ConfigError(ValueError):
     """Raised when a review config (`shiva.config.yml` / a repo's `.shiva.yml`) is malformed."""
 
 
-def validate_config(config, partial=False):
+def validate_config(config, partial=False, require_enabled=False):
     """Validate a review config, raising ConfigError with a clear message.
 
     Per-repo overrides (task 00014) invite users to hand-write a `.shiva.yml`, so
@@ -126,6 +126,12 @@ def validate_config(config, partial=False):
     same way, so a malformed override is caught before it reaches `merge_config`.
     The *effective* (merged) config is then validated in full, so a category
     that ends up without a `name`/`prompt` is still rejected.
+
+    With `require_enabled=True` (only meaningful on a full, non-partial config)
+    the config must enable at least one category (task 00016): otherwise the
+    review prompt would carry an empty "Review categories" section — a reviewer
+    with nothing to evaluate against. It is off by default so a structural check
+    of an override, which legitimately disables categories, still passes.
     """
     if not isinstance(config, dict):
         raise ConfigError(f"config must be a mapping, got {type(config).__name__}")
@@ -171,6 +177,13 @@ def validate_config(config, partial=False):
                 f"({type(enabled).__name__}); use true or false"
             )
 
+    if require_enabled and not partial:
+        if not any(cat.get("enabled") is True for cat in categories):
+            raise ConfigError(
+                "no review categories are enabled; enable at least one category "
+                "with 'enabled: true' so the review has something to check"
+            )
+
 
 def merge_config(base, override):
     """Merge a per-repo `override` config over the `base` defaults by category `id`.
@@ -214,13 +227,15 @@ def resolve_categories(config, override=None):
     Convenience wrapper: `load_enabled_categories(merge_config(config, override))`,
     with the merged (effective) config validated first (task 00015) so a
     malformed `.shiva.yml` fails with a clear ConfigError instead of a bare
-    KeyError. With no override it is equivalent to
-    `load_enabled_categories(config)` on a valid config.
+    KeyError. The effective config must also enable at least one category
+    (task 00016), so an override that turns every category off fails the build
+    rather than producing a reviewer with an empty prompt. With no override it is
+    equivalent to `load_enabled_categories(config)` on a valid config.
     """
     if override is not None:
         validate_config(override, partial=True)
     merged = merge_config(config, override)
-    validate_config(merged)
+    validate_config(merged, require_enabled=True)
     return load_enabled_categories(merged)
 
 
