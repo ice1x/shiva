@@ -1,8 +1,10 @@
 # Shiva PR Review Agent — review category configuration.
 #
 # This file is the default configuration and the reference schema. A target
-# repository can override it by placing its own `.shiva.yml` at the repo root
-# (task 00014); repo config is merged over these defaults by category `id`.
+# repository overrides it by placing its own `.shiva.yml` at the repo root
+# (task 00014); repo config is merged over these defaults by category `id` — a
+# matching id overrides only the fields it lists, a new id adds a category. See
+# the "Per-repo configuration" section of README.md.
 #
 # Each category:
 #   id:      unique slug, used for merging/overriding

@@ -5,6 +5,8 @@ from shiva_agent.review import (
     build_review_prompt,
     filter_files,
     load_enabled_categories,
+    merge_config,
+    resolve_categories,
     should_skip_pr,
 )
 
@@ -129,6 +131,98 @@ class TestShouldSkipPr:
         assert should_skip_pr(
             {"action": "opened", "pull_request": {"draft": None, "labels": None}}
         ) is False
+
+
+DEFAULTS = {
+    "version": 1,
+    "categories": [
+        {"id": "structural", "name": "Structural Review", "enabled": True, "prompt": "Check structure."},
+        {"id": "logical", "name": "Logical Review", "enabled": True, "prompt": "Check logic."},
+        {"id": "code-style", "name": "Code Style Review", "enabled": False, "prompt": "Check style."},
+    ],
+}
+
+
+class TestMergeConfig:
+    def test_none_override_returns_equivalent_defaults(self):
+        merged = merge_config(DEFAULTS, None)
+        assert merged["categories"] == DEFAULTS["categories"]
+
+    def test_empty_override_returns_equivalent_defaults(self):
+        assert merge_config(DEFAULTS, {})["categories"] == DEFAULTS["categories"]
+        assert merge_config(DEFAULTS, {"categories": []})["categories"] == DEFAULTS["categories"]
+
+    def test_override_disables_a_default_category(self):
+        override = {"categories": [{"id": "logical", "enabled": False}]}
+        merged = merge_config(DEFAULTS, override)
+        logical = next(c for c in merged["categories"] if c["id"] == "logical")
+        assert logical["enabled"] is False
+        # untouched fields survive from the defaults
+        assert logical["name"] == "Logical Review"
+        assert logical["prompt"] == "Check logic."
+
+    def test_override_enables_a_disabled_category(self):
+        override = {"categories": [{"id": "code-style", "enabled": True}]}
+        merged = merge_config(DEFAULTS, override)
+        assert next(c for c in merged["categories"] if c["id"] == "code-style")["enabled"] is True
+
+    def test_override_replaces_name_and_prompt(self):
+        override = {"categories": [{"id": "structural", "name": "Arch", "prompt": "Focus on layering."}]}
+        merged = merge_config(DEFAULTS, override)
+        structural = next(c for c in merged["categories"] if c["id"] == "structural")
+        assert structural["name"] == "Arch"
+        assert structural["prompt"] == "Focus on layering."
+        assert structural["enabled"] is True  # unspecified field kept
+
+    def test_new_category_is_appended(self):
+        override = {"categories": [{"id": "i18n", "name": "i18n Review", "enabled": True, "prompt": "Check strings."}]}
+        merged = merge_config(DEFAULTS, override)
+        assert [c["id"] for c in merged["categories"]] == ["structural", "logical", "code-style", "i18n"]
+
+    def test_preserves_default_order_and_appends_new_in_override_order(self):
+        override = {
+            "categories": [
+                {"id": "z-custom", "name": "Z", "enabled": True, "prompt": "z"},
+                {"id": "logical", "enabled": False},
+                {"id": "a-custom", "name": "A", "enabled": True, "prompt": "a"},
+            ]
+        }
+        merged = merge_config(DEFAULTS, override)
+        assert [c["id"] for c in merged["categories"]] == [
+            "structural",
+            "logical",
+            "code-style",
+            "z-custom",
+            "a-custom",
+        ]
+
+    def test_keeps_base_version(self):
+        assert merge_config(DEFAULTS, {"version": 99})["version"] == 1
+
+    def test_does_not_mutate_inputs(self):
+        override = {"categories": [{"id": "logical", "enabled": False}]}
+        import copy
+
+        base_before = copy.deepcopy(DEFAULTS)
+        override_before = copy.deepcopy(override)
+        merge_config(DEFAULTS, override)
+        assert DEFAULTS == base_before
+        assert override == override_before
+
+
+class TestResolveCategories:
+    def test_without_override_equals_load_enabled(self):
+        assert resolve_categories(DEFAULTS) == load_enabled_categories(DEFAULTS)
+
+    def test_override_disable_drops_category(self):
+        override = {"categories": [{"id": "logical", "enabled": False}]}
+        names = [c["name"] for c in resolve_categories(DEFAULTS, override)]
+        assert names == ["Structural Review"]
+
+    def test_override_adds_enabled_custom_category(self):
+        override = {"categories": [{"id": "i18n", "name": "i18n Review", "enabled": True, "prompt": "Check strings."}]}
+        names = [c["name"] for c in resolve_categories(DEFAULTS, override)]
+        assert names == ["Structural Review", "Logical Review", "i18n Review"]
 
 
 class TestBuildReviewPrompt:

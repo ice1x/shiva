@@ -39,6 +39,51 @@ def load_enabled_categories(config):
     ]
 
 
+def merge_config(base, override):
+    """Merge a per-repo `override` config over the `base` defaults by category `id`.
+
+    A target repository ships its own `.shiva.yml` to customize the review
+    (task 00014). Merge rules, applied by category `id`:
+
+    - a default whose `id` also appears in the override keeps its fields except
+      the ones the override provides (so `{'id': 'x', 'enabled': false}` just
+      flips the flag and leaves name/prompt intact);
+    - a category whose `id` is not among the defaults is appended as a new,
+      first-class custom category, in override order;
+    - the defaults' relative order is preserved; the top-level `version` is the
+      schema version and always comes from `base`.
+
+    Neither input is mutated. `override` may be None or lack a `categories` key,
+    in which case the result is an independent copy of the defaults.
+    """
+    overrides_by_id = {}
+    extra = []
+    for cat in (override or {}).get("categories") or []:
+        cat_id = cat.get("id")
+        if cat_id is not None and any(b.get("id") == cat_id for b in base.get("categories", [])):
+            overrides_by_id[cat_id] = cat
+        else:
+            extra.append(dict(cat))
+
+    merged_categories = []
+    for cat in base.get("categories", []):
+        merged = dict(cat)
+        merged.update(overrides_by_id.get(cat.get("id"), {}))
+        merged_categories.append(merged)
+    merged_categories.extend(extra)
+
+    return {"version": base.get("version"), "categories": merged_categories}
+
+
+def resolve_categories(config, override=None):
+    """Return the enabled categories after applying an optional per-repo override.
+
+    Convenience wrapper: `load_enabled_categories(merge_config(config, override))`.
+    With no override it is equivalent to `load_enabled_categories(config)`.
+    """
+    return load_enabled_categories(merge_config(config, override))
+
+
 def filter_files(files, allowed_extensions=None, max_patch_chars=DEFAULT_MAX_PATCH_CHARS):
     """Filter GitHub /pulls/{n}/files items down to reviewable ones.
 
