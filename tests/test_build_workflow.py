@@ -314,6 +314,96 @@ def test_code_node_reviews_only_the_surviving_files(workflow):
     assert out[0]["pairedItem"] == {"item": 0}
 
 
+def _review_node(workflow):
+    return next(n for n in workflow["nodes"] if n["name"] == "LLM Review")
+
+
+def _post_comment(workflow):
+    return next(n for n in workflow["nodes"] if n["name"] == "Post PR Comment")
+
+
+def _override_llm(tmp_path, provider, **fields):
+    lines = ["llm:", f"  provider: {provider}"]
+    for k, v in fields.items():
+        lines.append(f"  {k}: {v}")
+    # keep a valid enabled category set (override only touches llm)
+    path = tmp_path / ".shiva.yml"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_default_review_node_targets_anthropic(workflow):
+    """00019: with no llm config the review stays on Anthropic (backward compat)."""
+    node = _review_node(workflow)
+    assert node["parameters"]["url"] == "https://api.anthropic.com/v1/messages"
+    assert "claude-opus-4-8" in node["parameters"]["jsonBody"]
+    assert '"adaptive"' in node["parameters"]["jsonBody"]  # anthropic thinking
+    # Anthropic response shape is parsed for the comment body
+    assert "$json.content" in _post_comment(workflow)["parameters"]["jsonBody"]
+
+
+@pytest.mark.parametrize(
+    "provider,url,model",
+    [
+        ("openai", "https://api.openai.com/v1/chat/completions", "gpt-4o"),
+        ("deepseek", "https://api.deepseek.com/v1/chat/completions", "deepseek-chat"),
+        ("qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", "qwen-plus"),
+        ("ollama", "http://localhost:11434/v1/chat/completions", "qwen2.5"),
+    ],
+)
+def test_review_node_switches_provider(tmp_path, provider, url, model):
+    """00019: a repo's llm block retargets the review to any supported provider."""
+    wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, provider))
+    node = _review_node(wf)
+    body = node["parameters"]["jsonBody"]
+    assert node["parameters"]["url"] == url
+    assert model in body
+    assert '"adaptive"' not in body  # openai-compatible: no anthropic thinking block
+    # anthropic-version header must not travel to non-anthropic providers
+    header_names = [h["name"] for h in node["parameters"]["headerParameters"]["parameters"]]
+    assert "anthropic-version" not in header_names
+    # OpenAI response shape is parsed for the comment body
+    assert "$json.choices[0].message.content" in _post_comment(wf)["parameters"]["jsonBody"]
+
+
+def test_ollama_review_node_needs_no_credential(tmp_path):
+    """Local Ollama has no API key — the node must not request header auth."""
+    wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, "ollama"))
+    params = _review_node(wf)["parameters"]
+    assert "authentication" not in params  # no genericCredentialType
+    assert "genericAuthType" not in params
+
+
+def test_openai_family_review_node_uses_header_auth(tmp_path):
+    wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, "deepseek"))
+    params = _review_node(wf)["parameters"]
+    assert params["authentication"] == "genericCredentialType"
+    assert params["genericAuthType"] == "httpHeaderAuth"
+
+
+def test_llm_model_override_is_baked_in(tmp_path):
+    wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, "deepseek", model="deepseek-reasoner"))
+    assert "deepseek-reasoner" in _review_node(wf)["parameters"]["jsonBody"]
+
+
+def test_build_rejects_an_unknown_llm_provider(tmp_path):
+    from shiva_agent.review import ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, "gemini"))
+    assert "gemini" in str(exc.value)
+
+
+def test_agent_variant_switches_chat_model_for_openai_providers(tmp_path):
+    """00019: the agent variant's chat-model sub-node follows the provider too —
+    OpenAI-compatible providers use lmChatOpenAi with the provider's base URL."""
+    wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, "deepseek"), agent=True)
+    model_node = next(n for n in wf["nodes"] if n["name"] == "Anthropic Chat Model")
+    assert model_node["type"] == "@n8n/n8n-nodes-langchain.lmChatOpenAi"
+    assert model_node["parameters"]["options"]["baseURL"] == "https://api.deepseek.com/v1"
+    assert model_node["parameters"]["model"]["value"] == "deepseek-chat"
+
+
 def test_llm_node_uses_current_anthropic_api(workflow):
     llm = [
         n

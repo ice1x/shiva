@@ -28,6 +28,55 @@ SEVERITY_LEVELS = [
 # review on every label change.
 REVIEWABLE_ACTIONS = frozenset({"opened", "reopened", "ready_for_review", "synchronize"})
 
+# LLM providers the generated review workflow can target (task 00019). The MVP
+# hardwired the review to Anthropic's Messages API — endpoint, request body, and
+# even the response-parsing expression were Anthropic-specific — which vendor-
+# locked the one step that actually produces the review. Lifting the provider
+# into config removes that lock: a repo points the review at whatever model it
+# already pays for, or a free local one. DeepSeek, Qwen, OpenAI and Ollama all
+# speak the OpenAI `/chat/completions` schema, so they share a single "openai"
+# request/response shape and differ only in endpoint + default model (and, for
+# Ollama, needing no API key at all). Each preset:
+#   api:           request/response shape — "anthropic" or "openai"
+#   endpoint:      default HTTP endpoint (overridable, e.g. self-hosted Ollama)
+#   auth_header:   HTTP Header Auth credential name, or None for keyless (Ollama)
+#   default_model: model used when the config does not name one
+DEFAULT_LLM_PROVIDER = "anthropic"
+LLM_PROVIDERS = {
+    "anthropic": {
+        "api": "anthropic",
+        "endpoint": "https://api.anthropic.com/v1/messages",
+        "auth_header": "x-api-key",
+        "default_model": "claude-opus-4-8",
+    },
+    "openai": {
+        "api": "openai",
+        "endpoint": "https://api.openai.com/v1/chat/completions",
+        "auth_header": "Authorization",  # value: "Bearer <API key>"
+        "default_model": "gpt-4o",
+    },
+    "deepseek": {
+        "api": "openai",
+        "endpoint": "https://api.deepseek.com/v1/chat/completions",
+        "auth_header": "Authorization",
+        "default_model": "deepseek-chat",
+    },
+    "qwen": {
+        "api": "openai",
+        # Alibaba DashScope OpenAI-compatible mode (international endpoint).
+        "endpoint": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "auth_header": "Authorization",
+        "default_model": "qwen-plus",
+    },
+    "ollama": {
+        "api": "openai",
+        # Local Ollama's OpenAI-compatible endpoint; no API key required.
+        "endpoint": "http://localhost:11434/v1/chat/completions",
+        "auth_header": None,
+        "default_model": "qwen2.5",
+    },
+}
+
 # Name of the tool the AI Agent variant exposes so the model can pull extra
 # repository files for context (task 00013). Referenced both in the agent's
 # system prompt (below) and as the generated n8n tool node's name, so the two
@@ -151,6 +200,8 @@ def validate_config(config, partial=False, require_enabled=False):
             if not isinstance(pattern, str) or not pattern.strip():
                 raise ConfigError(f"exclude[{i}] must be a non-empty string glob pattern")
 
+    validate_llm(config.get("llm"))
+
     categories = config.get("categories", [])
     if not isinstance(categories, list):
         raise ConfigError(
@@ -192,6 +243,63 @@ def validate_config(config, partial=False, require_enabled=False):
                 "no review categories are enabled; enable at least one category "
                 "with 'enabled: true' so the review has something to check"
             )
+
+
+def validate_llm(llm):
+    """Validate an `llm` config block, raising ConfigError with a clear message.
+
+    The block is optional (absent → the Anthropic default). When present it must
+    be a mapping; `provider` (if given) must be one of the supported providers
+    (task 00019); and `model`/`endpoint` (if given) must be non-empty strings.
+    Returns None on success.
+    """
+    if llm is None:
+        return
+    if not isinstance(llm, dict):
+        raise ConfigError(f"llm must be a mapping, got {type(llm).__name__}")
+    provider = llm.get("provider")
+    if provider is not None and provider not in LLM_PROVIDERS:
+        known = ", ".join(sorted(LLM_PROVIDERS))
+        raise ConfigError(
+            f"llm.provider {provider!r} is not supported; choose one of: {known}"
+        )
+    for field in ("model", "endpoint"):
+        value = llm.get(field)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ConfigError(f"llm.{field} must be a non-empty string")
+
+
+def resolve_llm(config, override=None):
+    """Return the effective LLM provider settings after an optional override.
+
+    Removes the MVP's Anthropic vendor lock (task 00019): the review target is
+    chosen from `LLM_PROVIDERS` by the config's `llm.provider` (default
+    `anthropic`), with `llm.model` / `llm.endpoint` overriding the preset. A
+    target repo's `.shiva.yml` `llm` block *replaces* the base block wholesale
+    (the same override-wins rule as `conventions`/`exclude`), so switching
+    provider in one repo never half-inherits the base provider's model.
+
+    Returns a dict: ``{provider, api, endpoint, model, auth_header}`` — `api` is
+    the request/response shape (``anthropic`` or ``openai``) and `auth_header`
+    is the HTTP Header Auth credential name, or None for a keyless local
+    provider (Ollama).
+    """
+    for src in (override, config):
+        block = (src or {}).get("llm")
+        if block:
+            break
+    else:
+        block = {}
+    validate_llm(block)
+    name = block.get("provider", DEFAULT_LLM_PROVIDER)
+    preset = LLM_PROVIDERS[name]
+    return {
+        "provider": name,
+        "api": preset["api"],
+        "endpoint": block.get("endpoint") or preset["endpoint"],
+        "model": block.get("model") or preset["default_model"],
+        "auth_header": preset["auth_header"],
+    }
 
 
 def merge_config(base, override):

@@ -17,6 +17,29 @@
 
 version: 1
 
+# Which LLM performs the review (task 00019). The review step is no longer
+# vendor-locked to Anthropic: pick any supported provider. DeepSeek, Qwen,
+# OpenAI and Ollama all speak the OpenAI /chat/completions schema; Anthropic
+# uses its Messages API. A target repo's `.shiva.yml` `llm` block REPLACES this
+# one wholesale (override wins), so a repo can point the review at whatever
+# model it already pays for — or a free local Ollama.
+#
+#   provider: anthropic | openai | deepseek | qwen | ollama   (default: anthropic)
+#   model:    optional; overrides the provider's default model
+#   endpoint: optional; overrides the provider's default URL (e.g. remote Ollama)
+#
+# Credentials are attached in the n8n UI as an HTTP Header Auth credential on the
+# 'LLM Review' node (task 00002): 'x-api-key: <key>' for Anthropic,
+# 'Authorization: Bearer <key>' for OpenAI/DeepSeek/Qwen; Ollama needs none.
+# Examples:
+#   llm:
+#     provider: deepseek
+#   llm:
+#     provider: ollama            # local, no API key
+#     model: llama3.1
+llm:
+  provider: anthropic
+
 # Free-form house rules injected into the review prompt (task 00012). Leave
 # empty in the defaults; a target repo sets its own in `.shiva.yml` and it is
 # merged over this value (override wins). Example:

@@ -2,8 +2,10 @@ import pytest
 from faker import Faker
 
 from shiva_agent.review import (
+    DEFAULT_LLM_PROVIDER,
     FETCH_FILE_TOOL_DESCRIPTION,
     FETCH_FILE_TOOL_NAME,
+    LLM_PROVIDERS,
     SEVERITY_LEVELS,
     ConfigError,
     build_agent_system_prompt,
@@ -14,9 +16,11 @@ from shiva_agent.review import (
     resolve_categories,
     resolve_conventions,
     resolve_exclude,
+    resolve_llm,
     should_skip_pr,
     split_files_into_batches,
     validate_config,
+    validate_llm,
 )
 
 fake = Faker()
@@ -613,3 +617,100 @@ class TestFetchFileToolMetadata:
         desc = FETCH_FILE_TOOL_DESCRIPTION.lower()
         assert "path" in desc  # the input the model must supply
         assert "contents" in desc or "text" in desc  # what it returns
+
+
+class TestResolveLlm:
+    """00019: the review's LLM provider is chosen from config, not vendor-locked."""
+
+    def test_defaults_to_anthropic(self):
+        llm = resolve_llm({})
+        assert llm["provider"] == DEFAULT_LLM_PROVIDER == "anthropic"
+        assert llm["api"] == "anthropic"
+        assert llm["endpoint"] == "https://api.anthropic.com/v1/messages"
+        assert llm["model"] == "claude-opus-4-8"
+        assert llm["auth_header"] == "x-api-key"
+
+    def test_none_config_defaults_to_anthropic(self):
+        assert resolve_llm(None)["provider"] == "anthropic"
+
+    @pytest.mark.parametrize(
+        "provider,endpoint,model",
+        [
+            ("openai", "https://api.openai.com/v1/chat/completions", "gpt-4o"),
+            ("deepseek", "https://api.deepseek.com/v1/chat/completions", "deepseek-chat"),
+            (
+                "qwen",
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+                "qwen-plus",
+            ),
+            ("ollama", "http://localhost:11434/v1/chat/completions", "qwen2.5"),
+        ],
+    )
+    def test_openai_compatible_providers(self, provider, endpoint, model):
+        llm = resolve_llm({"llm": {"provider": provider}})
+        assert llm["provider"] == provider
+        assert llm["api"] == "openai"  # all four share the OpenAI schema
+        assert llm["endpoint"] == endpoint
+        assert llm["model"] == model
+
+    def test_ollama_needs_no_api_key(self):
+        assert resolve_llm({"llm": {"provider": "ollama"}})["auth_header"] is None
+
+    def test_openai_family_authenticates_with_a_bearer_header(self):
+        for provider in ("openai", "deepseek", "qwen"):
+            assert resolve_llm({"llm": {"provider": provider}})["auth_header"] == "Authorization"
+
+    def test_model_override_wins_over_the_preset_default(self):
+        llm = resolve_llm({"llm": {"provider": "deepseek", "model": "deepseek-reasoner"}})
+        assert llm["model"] == "deepseek-reasoner"
+        assert llm["provider"] == "deepseek"
+
+    def test_endpoint_override_for_self_hosted(self):
+        # e.g. Ollama on another host, or an OpenAI-compatible gateway
+        llm = resolve_llm({"llm": {"provider": "ollama", "endpoint": "http://gpu-box:11434/v1/chat/completions"}})
+        assert llm["endpoint"] == "http://gpu-box:11434/v1/chat/completions"
+
+    def test_override_block_replaces_the_base_wholesale(self):
+        base = {"llm": {"provider": "anthropic"}}
+        override = {"llm": {"provider": "openai"}}
+        llm = resolve_llm(base, override)
+        assert llm["provider"] == "openai"  # override wins
+        assert llm["model"] == "gpt-4o"  # not anthropic's claude model bleeding through
+
+    def test_no_override_uses_the_base_provider(self):
+        assert resolve_llm({"llm": {"provider": "qwen"}}, None)["provider"] == "qwen"
+
+    def test_rejects_an_unknown_provider(self):
+        with pytest.raises(ConfigError) as exc:
+            resolve_llm({"llm": {"provider": "gemini"}})
+        assert "gemini" in str(exc.value)
+
+
+class TestValidateLlm:
+    def test_absent_block_is_valid(self):
+        validate_llm(None)  # no exception
+
+    def test_every_shipped_provider_is_resolvable(self):
+        for provider in LLM_PROVIDERS:
+            validate_llm({"provider": provider})
+
+    def test_block_must_be_a_mapping(self):
+        with pytest.raises(ConfigError):
+            validate_llm(["openai"])
+
+    def test_unknown_provider_is_rejected(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_llm({"provider": "llama-cpp"})
+        assert "llama-cpp" in str(exc.value)
+
+    def test_blank_model_is_rejected(self):
+        with pytest.raises(ConfigError):
+            validate_llm({"provider": "openai", "model": "  "})
+
+    def test_non_string_endpoint_is_rejected(self):
+        with pytest.raises(ConfigError):
+            validate_llm({"provider": "ollama", "endpoint": 11434})
+
+    def test_llm_is_validated_through_validate_config(self):
+        with pytest.raises(ConfigError):
+            validate_config({"categories": [], "llm": {"provider": "nope"}})

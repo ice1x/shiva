@@ -162,7 +162,7 @@ Both images must be on the same version.
 
 The n8n workflow is generated, not hand-built. Sources of truth:
 
-- [`shiva.config.yml`](shiva.config.yml) — review categories (enabled ones end up in the prompt), per-repo `conventions`, and the [`exclude`](#excluded-files) globs for generated files
+- [`shiva.config.yml`](shiva.config.yml) — review categories (enabled ones end up in the prompt), per-repo `conventions`, the [`exclude`](#excluded-files) globs for generated files, and the [`llm`](#choosing-the-llm-provider) provider
 - [`src/shiva_agent/review.py`](src/shiva_agent/review.py) — diff filtering and prompt assembly (unit-tested, embedded verbatim into the Code node)
 - [`scripts/build_workflow.py`](scripts/build_workflow.py) — assembles [`workflows/pr_review.json`](workflows/pr_review.json)
 
@@ -177,14 +177,59 @@ docker exec shiva-n8n n8n import:workflow --input=/tmp/pr_review.json
 
 The imported workflow (`Shiva PR Review Agent`) wires: GitHub PR Webhook →
 Check Skip Conditions (Python Code node) → Skip Draft & Labeled PRs? (IF) →
-Fetch PR Files → Filter Diff & Build Prompt (Python Code node) → Claude Review
-(`claude-opus-4-8`, adaptive thinking) → Post PR Comment. Draft PRs and PRs
-labeled `skip-review` end at the IF gate without any GitHub or LLM calls
-(task `00010`). Before it can run
+Fetch PR Files → Filter Diff & Build Prompt (Python Code node) → LLM Review
+(the configured [provider](#choosing-the-llm-provider)) → Post PR Comment. Draft
+PRs and PRs labeled `skip-review` end at the IF gate without any GitHub or LLM
+calls (task `00010`). Before it can run
 end-to-end you still need to attach credentials in the n8n UI (task `00002`):
 an HTTP Header Auth credential `Authorization: Bearer <GitHub PAT>` on the two
-GitHub nodes and `x-api-key: <Anthropic API key>` on the Claude node, plus a
-tunnel `WEBHOOK_URL` for real webhooks (task `00003`).
+GitHub nodes and the model provider's key on the `LLM Review` node
+(`x-api-key: <Anthropic key>`, or `Authorization: Bearer <key>` for
+OpenAI/DeepSeek/Qwen; Ollama needs none), plus a tunnel `WEBHOOK_URL` for real
+webhooks (task `00003`).
+
+### Choosing the LLM provider
+
+The review step is **not vendor-locked**. The `llm` block in
+[`shiva.config.yml`](shiva.config.yml) (task `00019`) picks which model performs
+the review; a target repo's `.shiva.yml` `llm` block **replaces** it wholesale
+(the same override-wins rule as `conventions`/`exclude`), so a repo can point the
+review at whatever model it already pays for — or a free local one.
+
+| `provider` | API shape | Default endpoint | Default model | Key |
+|---|---|---|---|---|
+| `anthropic` (default) | Messages API | `api.anthropic.com/v1/messages` | `claude-opus-4-8` | `x-api-key` |
+| `openai` | `/chat/completions` | `api.openai.com/v1/chat/completions` | `gpt-4o` | `Authorization: Bearer` |
+| `deepseek` | `/chat/completions` | `api.deepseek.com/v1/chat/completions` | `deepseek-chat` | `Authorization: Bearer` |
+| `qwen` | `/chat/completions` | DashScope compatible-mode | `qwen-plus` | `Authorization: Bearer` |
+| `ollama` | `/chat/completions` | `localhost:11434/v1/chat/completions` | `qwen2.5` | none (local) |
+
+DeepSeek, Qwen, OpenAI, and Ollama all speak the OpenAI `/chat/completions`
+schema, so they share one request/response shape (the comment body is read from
+`choices[0].message.content`); Anthropic uses its Messages API (`content[].text`,
+adaptive thinking). `model` and `endpoint` are optional overrides (e.g. point
+`ollama` at a remote GPU box, or select `deepseek-reasoner`):
+
+```yaml
+# target-repo/.shiva.yml
+llm:
+  provider: deepseek        # anthropic | openai | deepseek | qwen | ollama
+  model: deepseek-reasoner  # optional; overrides the provider default
+```
+
+Because the provider is resolved and baked into the `LLM Review` node at build
+time, generate a repo-specific workflow by pointing the generator at the override:
+
+```bash
+.venv/bin/python scripts/build_workflow.py \
+    --override path/to/target-repo/.shiva.yml \
+    -o workflows/pr_review.<repo>.json
+```
+
+The **agent variant** follows the provider too: OpenAI-compatible providers use
+the LangChain `lmChatOpenAi` node with the provider's base URL instead of
+`lmChatAnthropic`. As with the rest of the agent variant, its n8n node schemas
+are best-effort and confirmed only under E2E (task `00008`).
 
 ### Large PRs
 
@@ -194,7 +239,7 @@ size-bounded batches with `split_files_into_batches` — greedily, in order,
 keeping each batch's combined patch length within `DEFAULT_MAX_BATCH_CHARS`
 (45k; a single file that alone exceeds the budget still gets its own pass and
 is never dropped). The Code node then returns **one item per batch**, so n8n
-fans out natively: one `Claude Review` call and one `Post PR Comment` per
+fans out natively: one `LLM Review` call and one `Post PR Comment` per
 batch. Each prompt is told which part it is (`review part i of N`) so the
 model scopes findings to the files shown instead of flagging the split-off
 files as missing, and every emitted item pins `pairedItem` to the single
@@ -216,7 +261,7 @@ referenced module.
 
 An **opt-in agentic variant** (task `00013`) addresses that. It reuses the whole
 upstream pipeline (skip gate → fetch files → `Filter Diff & Build Prompt`) but
-replaces the single `Claude Review` HTTP node with an **AI Agent** node wired to
+replaces the single `LLM Review` HTTP node with an **AI Agent** node wired to
 two sub-nodes:
 
 - an **Anthropic chat model** (`claude-opus-4-8`), and
@@ -268,6 +313,7 @@ Ordered by priority (highest first). Check off as you go.
 - [x] `00016` — Require at least one enabled category: an override that disables every category fails the build (`no review categories are enabled ...`) instead of silently producing a reviewer whose prompt has an empty "Review categories" section — see [Per-repo configuration](#per-repo-configuration)
 - [x] `00017` — Skip generated files: lock files, source maps, minified bundles, and vendored/generated code are dropped before review via a configurable `exclude` glob list in [`shiva.config.yml`](shiva.config.yml), so a paid LLM call is never spent reviewing machine-generated noise — see [Excluded files](#excluded-files)
 - [x] `00018` — Skip the review call when nothing survives filtering: if every changed file is dropped (binary, removed, oversized, or an excluded generated/vendored/lock file), the Code node emits no items so n8n skips the Claude call and the comment entirely — no paid review, no "no reviewable files" noise comment — see [Excluded files](#excluded-files)
+- [x] `00019` — Configurable LLM provider: the review is no longer vendor-locked to Anthropic — an `llm` block in [`shiva.config.yml`](shiva.config.yml) (per-repo overridable) targets Anthropic, OpenAI, DeepSeek, Qwen, or a local Ollama, so a repo reviews with whatever model it already pays for (or a free local one) — see [Choosing the LLM provider](#choosing-the-llm-provider)
 
 ## Definition of Done (MVP)
 

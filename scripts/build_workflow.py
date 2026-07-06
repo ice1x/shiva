@@ -25,8 +25,6 @@ OUTPUT_PATH = REPO_ROOT / "workflows" / "pr_review.json"
 # MVP workflow above stays byte-identical and its CI staleness check is unaffected.
 AGENT_OUTPUT_PATH = REPO_ROOT / "workflows" / "pr_review.agent.json"
 
-ANTHROPIC_MODEL = "claude-opus-4-8"
-
 
 def render_code_node(edit_hint, constants, functions, body):
     """Assemble the source for an n8n Python Code node from its parts.
@@ -157,19 +155,43 @@ def build_agent_node():
     }
 
 
-def build_chat_model_node():
-    """Anthropic chat model sub-node feeding the agent (ai_languageModel)."""
+def build_chat_model_node(llm):
+    """Chat model sub-node feeding the agent (ai_languageModel), per provider.
+
+    Anthropic uses the LangChain `lmChatAnthropic` node; the OpenAI-compatible
+    providers (openai/deepseek/qwen/ollama, task 00019) use `lmChatOpenAi` with
+    the provider's base URL, so the agent variant is no longer Anthropic-only.
+    """
+    if llm["api"] == "anthropic":
+        return {
+            "id": "chat_model",
+            "name": CHAT_MODEL_NODE,
+            "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+            "typeVersion": 1.3,
+            "position": None,
+            "parameters": {
+                "model": {"__rl": True, "mode": "list", "value": llm["model"]},
+                "options": {"maxTokensToSample": 16000},
+            },
+            "notes": "Credential: Anthropic API (x-api-key) — task 00002.",
+        }
+    # OpenAI-compatible: lmChatOpenAi with the provider's /v1 base URL.
+    base_url = llm["endpoint"].rsplit("/chat/completions", 1)[0]
+    note = (
+        f"Credential: OpenAI-compatible ({llm['provider']}) at {base_url}"
+        + ("; no API key (local Ollama)." if llm["auth_header"] is None else ".")
+    )
     return {
         "id": "chat_model",
         "name": CHAT_MODEL_NODE,
-        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
-        "typeVersion": 1.3,
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "typeVersion": 1.2,
         "position": None,
         "parameters": {
-            "model": {"__rl": True, "mode": "list", "value": ANTHROPIC_MODEL},
-            "options": {"maxTokensToSample": 16000},
+            "model": {"__rl": True, "mode": "list", "value": llm["model"]},
+            "options": {"baseURL": base_url, "maxTokens": 16000},
         },
-        "notes": "Credential: Anthropic API (x-api-key) — task 00002.",
+        "notes": note,
     }
 
 
@@ -219,6 +241,90 @@ def build_fetch_file_tool_node():
     }
 
 
+# --- Provider-agnostic review node (task 00019) -----------------------------
+# The MVP hard-wired the review to Anthropic's Messages API. These helpers build
+# the single-call review node and the comment-extraction expression from the
+# resolved `llm` settings instead, so the same workflow can target Anthropic,
+# OpenAI, DeepSeek, Qwen, or a local Ollama by config alone.
+
+
+def build_review_request_body(llm):
+    """The JSON body for the review HTTP call, as an n8n expression string.
+
+    Anthropic uses the Messages API (adaptive thinking, `content` blocks); the
+    OpenAI-compatible providers use `/chat/completions`. In both the prompt is
+    injected via ``JSON.stringify($json.prompt)`` so it is safely escaped.
+    """
+    if llm["api"] == "anthropic":
+        body = {
+            "model": llm["model"],
+            "max_tokens": 16000,
+            "thinking": {"type": "adaptive"},
+            "messages": [{"role": "user", "content": "{{ $json.prompt }}"}],
+        }
+    else:  # openai-compatible: openai, deepseek, qwen, ollama
+        body = {
+            "model": llm["model"],
+            "max_tokens": 16000,
+            "messages": [{"role": "user", "content": "{{ $json.prompt }}"}],
+        }
+    rendered = json.dumps(body, indent=2).replace(
+        '"{{ $json.prompt }}"', "{{ JSON.stringify($json.prompt) }}"
+    )
+    return "=" + rendered  # n8n expressions require a leading '='
+
+
+def build_review_comment_body(llm):
+    """The n8n expression that extracts the review text into a comment body.
+
+    Anthropic returns a `content` array of typed blocks; OpenAI-compatible APIs
+    return `choices[0].message.content` as a plain string.
+    """
+    if llm["api"] == "anthropic":
+        return (
+            "={{ JSON.stringify({ body: $json.content"
+            ".filter(b => b.type === 'text').map(b => b.text).join('\\n') }) }}"
+        )
+    return "={{ JSON.stringify({ body: $json.choices[0].message.content }) }}"
+
+
+def build_review_node(llm):
+    """The single-call review HTTP node, targeting the configured provider."""
+    headers = [{"name": "content-type", "value": "application/json"}]
+    if llm["api"] == "anthropic":
+        # anthropic-version is required by the Messages API; not sent otherwise.
+        headers.insert(0, {"name": "anthropic-version", "value": "2023-06-01"})
+    if llm["auth_header"] is None:
+        cred_note = f"No API key required ({llm['provider']} is local)."
+    elif llm["auth_header"] == "Authorization":
+        cred_note = "Credential: HTTP Header Auth 'Authorization' = 'Bearer <API key>'."
+    else:
+        cred_note = (
+            f"Credential: HTTP Header Auth '{llm['auth_header']}' = '<API key>'."
+        )
+    node = {
+        "id": "llm_review",
+        "name": "LLM Review",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": None,
+        "parameters": {
+            "method": "POST",
+            "url": llm["endpoint"],
+            "sendHeaders": True,
+            "headerParameters": {"parameters": headers},
+            "sendBody": True,
+            "specifyBody": "json",
+            "jsonBody": build_review_request_body(llm),
+        },
+        "notes": f"LLM: {llm['provider']} ({llm['model']}). {cred_note}",
+    }
+    if llm["auth_header"] is not None:
+        node["parameters"]["authentication"] = "genericCredentialType"
+        node["parameters"]["genericAuthType"] = "httpHeaderAuth"
+    return node
+
+
 def build_workflow(config_path, override_path=None, agent=False):
     """Build the n8n workflow from the default config.
 
@@ -226,7 +332,7 @@ def build_workflow(config_path, override_path=None, agent=False):
     are merged over the defaults by `id` (task 00014) before being embedded, so
     a per-repo review configuration can be baked into a repo-specific workflow.
 
-    When `agent` is true, the single-call `Claude Review` node is replaced by an
+    When `agent` is true, the single-call `LLM Review` node is replaced by an
     AI Agent node wired to a chat model and a `fetch_repo_file` tool, so the
     model can request extra repository files for context (task 00013). The
     upstream skip-gate / fetch / filter pipeline is identical in both variants.
@@ -236,6 +342,7 @@ def build_workflow(config_path, override_path=None, agent=False):
     enabled = review.resolve_categories(config, override)
     conventions = review.resolve_conventions(config, override)
     exclude_globs = review.resolve_exclude(config, override)
+    llm = review.resolve_llm(config, override)
 
     webhook = {
         "id": "webhook",
@@ -333,40 +440,7 @@ def build_workflow(config_path, override_path=None, agent=False):
         },
     }
 
-    llm = {
-        "id": "llm_review",
-        "name": "Claude Review",
-        "type": "n8n-nodes-base.httpRequest",
-        "typeVersion": 4.2,
-        "position": None,
-        "parameters": {
-            "method": "POST",
-            "url": "https://api.anthropic.com/v1/messages",
-            "authentication": "genericCredentialType",
-            "genericAuthType": "httpHeaderAuth",
-            "sendHeaders": True,
-            "headerParameters": {
-                "parameters": [
-                    {"name": "anthropic-version", "value": "2023-06-01"},
-                    {"name": "content-type", "value": "application/json"},
-                ]
-            },
-            "sendBody": True,
-            "specifyBody": "json",
-            "jsonBody": json.dumps(
-                {
-                    "model": ANTHROPIC_MODEL,
-                    "max_tokens": 16000,
-                    "thinking": {"type": "adaptive"},
-                    "messages": [{"role": "user", "content": "{{ $json.prompt }}"}],
-                },
-                indent=2,
-            ).replace('"{{ $json.prompt }}"', "{{ JSON.stringify($json.prompt) }}"),
-        },
-        "notes": "Credential: HTTP Header Auth with name 'x-api-key', value '<Anthropic API key>'.",
-    }
-    # n8n expressions require a leading '=' on the whole value
-    llm["parameters"]["jsonBody"] = "=" + llm["parameters"]["jsonBody"]
+    review_node = build_review_node(llm)
 
     post_comment = {
         "id": "post_comment",
@@ -388,7 +462,7 @@ def build_workflow(config_path, override_path=None, agent=False):
             },
             "sendBody": True,
             "specifyBody": "json",
-            "jsonBody": "={{ JSON.stringify({ body: $json.content.filter(b => b.type === 'text').map(b => b.text).join('\\n') }) }}",
+            "jsonBody": build_review_comment_body(llm),
             "options": {},
         },
         "notes": "Same GitHub PAT credential as 'Fetch PR Files'.",
@@ -411,7 +485,7 @@ def build_workflow(config_path, override_path=None, agent=False):
 
     if agent:
         review_agent = build_agent_node()
-        chat_model = build_chat_model_node()
+        chat_model = build_chat_model_node(llm)
         fetch_tool = build_fetch_file_tool_node()
         # The agent emits its answer as plain text on $json.output.
         agent_post_comment = dict(post_comment)
@@ -449,7 +523,7 @@ def build_workflow(config_path, override_path=None, agent=False):
             "active": False,
         }
 
-    nodes = prefix + [llm, post_comment]
+    nodes = prefix + [review_node, post_comment]
     # Lay the nodes out left-to-right in execution order; deriving each position
     # from its index means inserting a node never rewrites downstream ones.
     for i, node in enumerate(nodes):
@@ -457,9 +531,9 @@ def build_workflow(config_path, override_path=None, agent=False):
 
     connections = dict(common_connections)
     connections["Filter Diff & Build Prompt"] = {
-        "main": [[{"node": "Claude Review", "type": "main", "index": 0}]]
+        "main": [[{"node": "LLM Review", "type": "main", "index": 0}]]
     }
-    connections["Claude Review"] = {"main": [[{"node": "Post PR Comment", "type": "main", "index": 0}]]}
+    connections["LLM Review"] = {"main": [[{"node": "Post PR Comment", "type": "main", "index": 0}]]}
 
     return {
         "id": "ShivaPrReview001",

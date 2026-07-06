@@ -113,7 +113,7 @@
     },
     {
       "id": "llm_review",
-      "name": "Claude Review",
+      "name": "LLM Review",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
@@ -123,8 +123,6 @@
       "parameters": {
         "method": "POST",
         "url": "https://api.anthropic.com/v1/messages",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -140,9 +138,11 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"model\": \"claude-opus-4-8\",\n  \"max_tokens\": 16000,\n  \"thinking\": {\n    \"type\": \"adaptive\"\n  },\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.prompt) }}\n    }\n  ]\n}"
+        "jsonBody": "={\n  \"model\": \"claude-opus-4-8\",\n  \"max_tokens\": 16000,\n  \"thinking\": {\n    \"type\": \"adaptive\"\n  },\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.prompt) }}\n    }\n  ]\n}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
-      "notes": "Credential: HTTP Header Auth with name 'x-api-key', value '<Anthropic API key>'."
+      "notes": "LLM: anthropic (claude-opus-4-8). Credential: HTTP Header Auth 'x-api-key' = '<API key>'."
     },
     {
       "id": "post_comment",
@@ -229,14 +229,14 @@
       "main": [
         [
           {
-            "node": "Claude Review",
+            "node": "LLM Review",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Claude Review": {
+    "LLM Review": {
       "main": [
         [
           {
