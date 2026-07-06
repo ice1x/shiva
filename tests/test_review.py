@@ -304,6 +304,19 @@ class TestResolveCategories:
         override = {"categories": [{"id": "security", "enabled": True}]}
         validate_config(override, partial=True)  # must not raise
 
+    def test_rejects_config_with_no_enabled_categories(self):
+        # 00016: disabling every category would otherwise build a reviewer whose
+        # prompt has an empty "# Review categories" section — a do-nothing agent.
+        override = {
+            "categories": [
+                {"id": "structural", "enabled": False},
+                {"id": "logical", "enabled": False},
+            ]
+        }
+        with pytest.raises(ConfigError) as exc:
+            resolve_categories(DEFAULTS, override)
+        assert "enabled" in str(exc.value)
+
 
 class TestValidateConfig:
     def test_accepts_a_well_formed_config(self):
@@ -373,6 +386,33 @@ class TestValidateConfig:
         with pytest.raises(ConfigError) as exc:
             validate_config({"conventions": ["not", "a", "string"], "categories": []})
         assert "conventions" in str(exc.value)
+
+    def test_does_not_require_enabled_categories_by_default(self):
+        # Structural validation alone tolerates an all-disabled config; the
+        # "at least one enabled" rule is opt-in via require_enabled (00016).
+        config = {"categories": [{"id": "x", "name": "X", "prompt": "p", "enabled": False}]}
+        assert validate_config(config) is None
+
+    def test_require_enabled_rejects_an_all_disabled_config(self):
+        config = {"categories": [{"id": "x", "name": "X", "prompt": "p", "enabled": False}]}
+        with pytest.raises(ConfigError) as exc:
+            validate_config(config, require_enabled=True)
+        assert "enabled" in str(exc.value)
+
+    def test_require_enabled_accepts_at_least_one_enabled(self):
+        config = {
+            "categories": [
+                {"id": "x", "name": "X", "prompt": "p", "enabled": False},
+                {"id": "y", "name": "Y", "prompt": "q", "enabled": True},
+            ]
+        }
+        assert validate_config(config, require_enabled=True) is None
+
+    def test_require_enabled_is_relaxed_for_a_partial_override(self):
+        # A per-repo override may disable categories; the enabled-count is only
+        # enforced on the merged effective config, never on a partial override.
+        override = {"categories": [{"id": "logical", "enabled": False}]}
+        assert validate_config(override, partial=True, require_enabled=True) is None
 
 
 class TestBuildReviewPrompt:

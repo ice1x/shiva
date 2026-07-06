@@ -170,6 +170,25 @@ def test_build_rejects_a_malformed_override(tmp_path):
     assert "prompt" in str(exc.value)
 
 
+def test_build_rejects_a_config_with_no_enabled_categories(tmp_path):
+    """00016: an override that disables every category fails the build instead of
+    silently generating a reviewer whose prompt has no review categories."""
+    from shiva_agent.review import ConfigError
+
+    override = tmp_path / ".shiva.yml"
+    override.write_text(
+        "categories:\n"
+        "  - id: structural\n    enabled: false\n"
+        "  - id: logical\n    enabled: false\n"
+        "  - id: behavioral\n    enabled: false\n"
+        "  - id: security\n    enabled: false\n"
+        "  - id: performance\n    enabled: false\n"
+    )
+    with pytest.raises(ConfigError) as exc:
+        build_workflow(CONFIG_PATH, override_path=override)
+    assert "enabled" in str(exc.value)
+
+
 def test_code_node_embeds_tuned_prompt_scaffolding(workflow):
     """00012: severity scale and structured output format travel with the
     embedded build_review_prompt so the runtime prompt is fully specified."""
