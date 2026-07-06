@@ -2,7 +2,10 @@ import pytest
 from faker import Faker
 
 from shiva_agent.review import (
+    FETCH_FILE_TOOL_DESCRIPTION,
+    FETCH_FILE_TOOL_NAME,
     SEVERITY_LEVELS,
+    build_agent_system_prompt,
     build_review_prompt,
     filter_files,
     load_enabled_categories,
@@ -368,3 +371,40 @@ class TestResolveConventions:
 
     def test_strips_surrounding_whitespace(self):
         assert resolve_conventions({"conventions": "\n  Trim me.\n"}) == "Trim me."
+
+
+class TestBuildAgentSystemPrompt:
+    """00013: the AI Agent variant's system prompt tells the model it may fetch
+    extra repo files and to review only from evidence it has actually read."""
+
+    def test_references_the_fetch_tool_by_name(self):
+        prompt = build_agent_system_prompt()
+        assert FETCH_FILE_TOOL_NAME in prompt
+
+    def test_instructs_to_review_from_evidence_not_speculation(self):
+        prompt = build_agent_system_prompt().lower()
+        # the whole point of giving the model a fetch tool is to stop it guessing
+        assert "never" in prompt
+        assert "guess" in prompt or "speculat" in prompt
+
+    def test_defers_categories_and_format_to_the_user_message(self):
+        # categories/severity/output format still come from build_review_prompt,
+        # so the system prompt must not redefine them — it points at the user msg
+        prompt = build_agent_system_prompt().lower()
+        assert "user message" in prompt
+
+    def test_is_a_nonempty_string(self):
+        assert isinstance(build_agent_system_prompt(), str)
+        assert build_agent_system_prompt().strip()
+
+
+class TestFetchFileToolMetadata:
+    def test_tool_name_is_a_bare_identifier(self):
+        # used verbatim as the n8n tool node name and referenced in the prompt
+        assert FETCH_FILE_TOOL_NAME == FETCH_FILE_TOOL_NAME.strip()
+        assert " " not in FETCH_FILE_TOOL_NAME
+
+    def test_description_explains_input_and_output(self):
+        desc = FETCH_FILE_TOOL_DESCRIPTION.lower()
+        assert "path" in desc  # the input the model must supply
+        assert "contents" in desc or "text" in desc  # what it returns

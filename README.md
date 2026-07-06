@@ -155,6 +155,46 @@ embedded script is exercised against sample PRs; confirming that multiple
 comments actually post on a real large PR is part of the end-to-end test
 (task `00008`), which needs live credentials.
 
+### AI Agent variant (extra-file context)
+
+By default the review is a single stateless call: the diff goes to Claude and
+the answer comes back. A diff only shows changed hunks, so the model sometimes
+cannot tell whether a change is correct without seeing code it does not have —
+the rest of a partially-shown file, a caller, a callee, a base class, a
+referenced module.
+
+An **opt-in agentic variant** (task `00013`) addresses that. It reuses the whole
+upstream pipeline (skip gate → fetch files → `Filter Diff & Build Prompt`) but
+replaces the single `Claude Review` HTTP node with an **AI Agent** node wired to
+two sub-nodes:
+
+- an **Anthropic chat model** (`claude-opus-4-8`), and
+- a **`fetch_repo_file` HTTP tool** that reads a file's full contents from the
+  pull request's repository **at the head commit** (`GET
+  /repos/{owner}/{repo}/contents/{path}?ref={head.sha}`, `raw+json`). The model
+  supplies the repository-relative `path`; owner/repo/sha come from the original
+  webhook event, so the tool always reads the exact code under review.
+
+The agent's system prompt ([`build_agent_system_prompt`](src/shiva_agent/review.py))
+tells the model to fetch only what materially helps and to **base every finding
+on code it has actually read — the diff or a file it fetched — never on a guess**.
+The categories, severity scale, and output format still arrive in the user
+message from `build_review_prompt`, so both variants produce reviews in the same
+shape.
+
+Generate it separately (the default `pr_review.json` is untouched, so its CI
+staleness check is unaffected):
+
+```bash
+.venv/bin/python scripts/build_workflow.py --agent   # → workflows/pr_review.agent.json
+```
+
+The variant's node **shape** and its `fetch_repo_file` wiring are unit-tested,
+but the n8n LangChain node type ids / versions are best-effort and are **not**
+verifiable without a live n8n LangChain runtime. Confirming the agent actually
+loads, calls the tool, and improves reviews on real PRs is folded into the
+end-to-end test (task `00008`).
+
 ## Task List
 
 Ordered by priority (highest first). Check off as you go.
@@ -171,7 +211,7 @@ Ordered by priority (highest first). Check off as you go.
 - [x] `00010` — Add an IF node to skip draft PRs and PRs labeled `skip-review`
 - [x] `00011` — Handle large PRs: the diff is packed into size-bounded batches (`split_files_into_batches`, budget `DEFAULT_MAX_BATCH_CHARS`) and the Code node emits one item per batch, so n8n reviews a big PR in several passes (one Claude call + one comment per batch) — see [Large PRs](#large-prs)
 - [x] `00012` — Tune the review prompt: a defined severity scale (blocker/high/medium/low), a fixed output format (Summary / Verdict / ordered Findings), and per-repo `conventions` injected from `.shiva.yml` — see [Per-repo configuration](#per-repo-configuration)
-- [ ] `00013` — Experiment with the AI Agent node + tools so the model can request extra repo files for context
+- [x] `00013` — Experiment with the AI Agent node + tools: an opt-in agentic variant replaces the single Claude HTTP call with an AI Agent node wired to a `fetch_repo_file` tool, so the model can pull extra repository files for context — see [AI Agent variant](#ai-agent-variant-extra-file-context)
 - [x] `00014` — Per-repo overrides: a target repo ships its own `.shiva.yml`, merged over the defaults in [`shiva.config.yml`](shiva.config.yml) by category `id` — see [Per-repo configuration](#per-repo-configuration) (build-time merge via `--override`; runtime auto-fetch is a follow-up)
 
 ## Definition of Done (MVP)

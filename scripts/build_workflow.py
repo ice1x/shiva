@@ -21,6 +21,9 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from shiva_agent import review  # noqa: E402
 
 OUTPUT_PATH = REPO_ROOT / "workflows" / "pr_review.json"
+# The AI Agent variant (task 00013) is generated separately so the default
+# MVP workflow above stays byte-identical and its CI staleness check is unaffected.
+AGENT_OUTPUT_PATH = REPO_ROOT / "workflows" / "pr_review.agent.json"
 
 ANTHROPIC_MODEL = "claude-opus-4-8"
 
@@ -110,12 +113,113 @@ return out"""
     )
 
 
-def build_workflow(config_path, override_path=None):
+# --- AI Agent variant (task 00013) -----------------------------------------
+# The default workflow reviews the diff in a single stateless HTTP call to the
+# Anthropic API. The agent variant swaps that node for an n8n AI Agent that runs
+# the model in a tool-use loop with a `fetch_repo_file` tool, so it can pull
+# extra files from the target repo for context. Everything upstream (skip gate,
+# fetch files, filter/build-prompt Code node) is reused unchanged.
+#
+# NOTE: the LangChain node type ids and typeVersions below are best-effort and
+# are NOT verifiable without a live n8n LangChain runtime; confirming the agent
+# actually loads and fans out is folded into the E2E task 00008.
+AGENT_NODE = "AI Review Agent"
+CHAT_MODEL_NODE = "Anthropic Chat Model"
+FETCH_FILE_TOOL_NODE = "Fetch Repo File"
+
+
+def build_agent_node():
+    """The AI Agent node: reviews the prompt, may call the file-fetch tool."""
+    return {
+        "id": "review_agent",
+        "name": AGENT_NODE,
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "typeVersion": 1.9,
+        "position": None,
+        "parameters": {
+            "promptType": "define",
+            # The user message is the same fully-specified review prompt the
+            # default workflow builds (categories + severity + output format).
+            "text": "={{ $json.prompt }}",
+            "options": {"systemMessage": review.build_agent_system_prompt()},
+        },
+        "notes": "Task 00013: agentic review — the model can call the file-fetch tool for extra context.",
+    }
+
+
+def build_chat_model_node():
+    """Anthropic chat model sub-node feeding the agent (ai_languageModel)."""
+    return {
+        "id": "chat_model",
+        "name": CHAT_MODEL_NODE,
+        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+        "typeVersion": 1.3,
+        "position": None,
+        "parameters": {
+            "model": {"__rl": True, "mode": "list", "value": ANTHROPIC_MODEL},
+            "options": {"maxTokensToSample": 16000},
+        },
+        "notes": "Credential: Anthropic API (x-api-key) — task 00002.",
+    }
+
+
+def build_fetch_file_tool_node():
+    """HTTP Request tool the agent calls to fetch a repo file at the head SHA.
+
+    The model supplies a repository-relative path via the `{path}` placeholder;
+    owner/repo and the head commit come from the original webhook event, so the
+    tool always reads the exact code under review. `raw+json` returns the file
+    body as plain text rather than base64-wrapped JSON.
+    """
+    full_name = "$('GitHub PR Webhook').item.json.body.repository.full_name"
+    head_sha = "$('GitHub PR Webhook').item.json.body.pull_request.head.sha"
+    return {
+        "id": "fetch_file_tool",
+        "name": FETCH_FILE_TOOL_NODE,
+        "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+        "typeVersion": 1.1,
+        "position": None,
+        "parameters": {
+            "toolDescription": review.FETCH_FILE_TOOL_DESCRIPTION,
+            "method": "GET",
+            "url": (
+                "=https://api.github.com/repos/{{ " + full_name + " }}"
+                "/contents/{path}?ref={{ " + head_sha + " }}"
+            ),
+            "authentication": "genericCredentialType",
+            "genericAuthType": "httpHeaderAuth",
+            "sendHeaders": True,
+            "headerParameters": {
+                "parameters": [
+                    {"name": "Accept", "value": "application/vnd.github.raw+json"},
+                    {"name": "User-Agent", "value": "shiva-pr-review-agent"},
+                ]
+            },
+            "placeholderDefinitions": {
+                "values": [
+                    {
+                        "name": "path",
+                        "description": "repository-relative file path to fetch, e.g. src/app/main.py",
+                        "type": "string",
+                    }
+                ]
+            },
+        },
+        "notes": "Same GitHub PAT credential as 'Fetch PR Files' (task 00002).",
+    }
+
+
+def build_workflow(config_path, override_path=None, agent=False):
     """Build the n8n workflow from the default config.
 
     When `override_path` points at a target repo's `.shiva.yml`, its categories
     are merged over the defaults by `id` (task 00014) before being embedded, so
     a per-repo review configuration can be baked into a repo-specific workflow.
+
+    When `agent` is true, the single-call `Claude Review` node is replaced by an
+    AI Agent node wired to a chat model and a `fetch_repo_file` tool, so the
+    model can request extra repository files for context (task 00013). The
+    upstream skip-gate / fetch / filter pipeline is identical in both variants.
     """
     config = yaml.safe_load(Path(config_path).read_text())
     override = yaml.safe_load(Path(override_path).read_text()) if override_path else None
@@ -279,13 +383,9 @@ def build_workflow(config_path, override_path=None):
         "notes": "Same GitHub PAT credential as 'Fetch PR Files'.",
     }
 
-    nodes = [webhook, check_skip, skip_gate, fetch_files, code, llm, post_comment]
-    # Lay the nodes out left-to-right in execution order; deriving each position
-    # from its index means inserting a node never rewrites downstream ones.
-    for i, node in enumerate(nodes):
-        node["position"] = [220 * i, 0]
-
-    connections = {
+    # Nodes shared by both variants (webhook → skip gate → fetch → build prompt).
+    prefix = [webhook, check_skip, skip_gate, fetch_files, code]
+    common_connections = {
         "GitHub PR Webhook": {"main": [[{"node": "Check Skip Conditions", "type": "main", "index": 0}]]},
         "Check Skip Conditions": {"main": [[{"node": "Skip Draft & Labeled PRs?", "type": "main", "index": 0}]]},
         # IF node: output 0 = true (skip == false → review), output 1 = false (skip → stop)
@@ -296,9 +396,59 @@ def build_workflow(config_path, override_path=None):
             ]
         },
         "Fetch PR Files": {"main": [[{"node": "Filter Diff & Build Prompt", "type": "main", "index": 0}]]},
-        "Filter Diff & Build Prompt": {"main": [[{"node": "Claude Review", "type": "main", "index": 0}]]},
-        "Claude Review": {"main": [[{"node": "Post PR Comment", "type": "main", "index": 0}]]},
     }
+
+    if agent:
+        review_agent = build_agent_node()
+        chat_model = build_chat_model_node()
+        fetch_tool = build_fetch_file_tool_node()
+        # The agent emits its answer as plain text on $json.output.
+        agent_post_comment = dict(post_comment)
+        agent_post_comment["parameters"] = dict(post_comment["parameters"])
+        agent_post_comment["parameters"]["jsonBody"] = (
+            "={{ JSON.stringify({ body: $json.output }) }}"
+        )
+
+        main_chain = prefix + [review_agent, agent_post_comment]
+        for i, node in enumerate(main_chain):
+            node["position"] = [220 * i, 0]
+        # Sub-nodes hang below the agent (position is cosmetic on the canvas).
+        chat_model["position"] = [review_agent["position"][0] - 80, 220]
+        fetch_tool["position"] = [review_agent["position"][0] + 120, 220]
+        nodes = main_chain + [chat_model, fetch_tool]
+
+        connections = dict(common_connections)
+        connections["Filter Diff & Build Prompt"] = {
+            "main": [[{"node": AGENT_NODE, "type": "main", "index": 0}]]
+        }
+        connections[AGENT_NODE] = {"main": [[{"node": "Post PR Comment", "type": "main", "index": 0}]]}
+        # Sub-nodes attach to the agent via the LangChain connection types.
+        connections[CHAT_MODEL_NODE] = {
+            "ai_languageModel": [[{"node": AGENT_NODE, "type": "ai_languageModel", "index": 0}]]
+        }
+        connections[FETCH_FILE_TOOL_NODE] = {
+            "ai_tool": [[{"node": AGENT_NODE, "type": "ai_tool", "index": 0}]]
+        }
+        return {
+            "id": "ShivaPrReviewAgent001",
+            "name": "Shiva PR Review Agent (agentic)",
+            "nodes": nodes,
+            "connections": connections,
+            "settings": {"executionOrder": "v1"},
+            "active": False,
+        }
+
+    nodes = prefix + [llm, post_comment]
+    # Lay the nodes out left-to-right in execution order; deriving each position
+    # from its index means inserting a node never rewrites downstream ones.
+    for i, node in enumerate(nodes):
+        node["position"] = [220 * i, 0]
+
+    connections = dict(common_connections)
+    connections["Filter Diff & Build Prompt"] = {
+        "main": [[{"node": "Claude Review", "type": "main", "index": 0}]]
+    }
+    connections["Claude Review"] = {"main": [[{"node": "Post PR Comment", "type": "main", "index": 0}]]}
 
     return {
         "id": "ShivaPrReview001",
@@ -318,19 +468,29 @@ def main(argv=None):
         help="a target repo's .shiva.yml, merged over the defaults by category id",
     )
     parser.add_argument(
+        "--agent",
+        action="store_true",
+        help="build the AI Agent variant (model can fetch extra repo files, task 00013)",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         metavar="PATH",
-        default=OUTPUT_PATH,
+        default=None,
         type=Path,
-        help=f"where to write the workflow JSON (default: {OUTPUT_PATH.relative_to(REPO_ROOT)})",
+        help="where to write the workflow JSON "
+        f"(default: {OUTPUT_PATH.relative_to(REPO_ROOT)}, "
+        f"or {AGENT_OUTPUT_PATH.relative_to(REPO_ROOT)} with --agent)",
     )
     args = parser.parse_args(argv)
 
-    workflow = build_workflow(REPO_ROOT / "shiva.config.yml", override_path=args.override)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(workflow, indent=2) + "\n")
-    print(f"wrote {args.output}")
+    output = args.output or (AGENT_OUTPUT_PATH if args.agent else OUTPUT_PATH)
+    workflow = build_workflow(
+        REPO_ROOT / "shiva.config.yml", override_path=args.override, agent=args.agent
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(workflow, indent=2) + "\n")
+    print(f"wrote {output}")
 
 
 if __name__ == "__main__":
