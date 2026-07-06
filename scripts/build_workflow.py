@@ -62,6 +62,35 @@ return [{"json": {"skip": should_skip_pr(body), "body": body}}]"""
     )
 
 
+def build_gate_node_script(api):
+    """Compose the Python source for the 'Skip Empty Review' gate Code node.
+
+    Reads the single LLM Review response and, when it names nothing to act on
+    (the NO_FINDINGS_SENTINEL alone), emits no items so n8n skips Post PR Comment
+    — the post/skip decision comes from ONE LLM call, no extra tokens. Otherwise
+    passes the response through unchanged so Post PR Comment's expression works.
+    """
+    constants = (
+        f"SEVERITY_LEVELS = {json.dumps(review.SEVERITY_LEVELS, indent=2)}\n"
+        f"NO_FINDINGS_SENTINEL = {json.dumps(review.NO_FINDINGS_SENTINEL)}\n"
+        f"LLM_API = {json.dumps(api)}"
+    )
+    functions = (
+        inspect.getsource(review.extract_review_text)
+        + "\n"
+        + inspect.getsource(review.review_has_action_items)
+    )
+    body = (
+        'resp = (_items[0].get("json") if _items else {}) or {}\n'
+        "if review_has_action_items(extract_review_text(resp, LLM_API)):\n"
+        "    return _items\n"
+        "return []"
+    )
+    return render_code_node(
+        "Edit src/shiva_agent/review.py, then regenerate.", constants, functions, body
+    )
+
+
 def build_code_node_script(enabled_categories, conventions="", exclude_globs=None):
     """Compose the Python source for the n8n Code node (Python runtime)."""
     functions = (
@@ -80,6 +109,8 @@ def build_code_node_script(enabled_categories, conventions="", exclude_globs=Non
 
 # Severity scale + per-repo conventions baked into the prompt (task 00012).
 SEVERITY_LEVELS = {json.dumps(review.SEVERITY_LEVELS, indent=2)}
+# The no-findings sentinel build_review_prompt instructs the model to return.
+NO_FINDINGS_SENTINEL = {json.dumps(review.NO_FINDINGS_SENTINEL)}
 CONVENTIONS = {json.dumps(conventions)}
 
 ALLOWED_EXTENSIONS = None  # e.g. [".py"] to review Python files only
@@ -494,7 +525,24 @@ def build_workflow(config_path, override_path=None, agent=False, repo=None):
             "active": False,
         }
 
-    nodes = prefix + [review_node, post_comment]
+    # Gate: post the comment only when the single LLM Review names something to
+    # act on; otherwise emit no items so n8n skips Post PR Comment (no noise, no
+    # wasted GitHub call). Same empty-items skip mechanism as the diff filter.
+    skip_empty = {
+        "id": "skip_empty_review",
+        "name": "Skip Empty Review",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": None,
+        "parameters": {
+            "language": "python",
+            "pythonCode": build_gate_node_script(llm["api"]),
+        },
+        "notes": "Post only when the review has action items; a bare "
+        f"'{review.NO_FINDINGS_SENTINEL}' emits no items so Post PR Comment is skipped.",
+    }
+
+    nodes = prefix + [review_node, skip_empty, post_comment]
     # Lay the nodes out left-to-right in execution order; deriving each position
     # from its index means inserting a node never rewrites downstream ones.
     for i, node in enumerate(nodes):
@@ -504,7 +552,8 @@ def build_workflow(config_path, override_path=None, agent=False, repo=None):
     connections["Filter Diff & Build Prompt"] = {
         "main": [[{"node": "LLM Review", "type": "main", "index": 0}]]
     }
-    connections["LLM Review"] = {"main": [[{"node": "Post PR Comment", "type": "main", "index": 0}]]}
+    connections["LLM Review"] = {"main": [[{"node": "Skip Empty Review", "type": "main", "index": 0}]]}
+    connections["Skip Empty Review"] = {"main": [[{"node": "Post PR Comment", "type": "main", "index": 0}]]}
 
     return {
         "id": "ShivaPrReview001",

@@ -50,6 +50,10 @@ MAX_OUTPUT_TOKENS = 16000
 # `llm.temperature`. Applied to the OpenAI-family body; Anthropic keeps adaptive
 # thinking, which is incompatible with a fixed temperature.
 DEFAULT_TEMPERATURE = 0
+# Sentinel the model returns (alone) when a PR has nothing worth acting on, so
+# the workflow posts NO comment — decided from the single review call, no extra
+# tokens. A real review (with findings) never equals this.
+NO_FINDINGS_SENTINEL = "APPROVED"
 
 
 class LLMApi:
@@ -853,19 +857,23 @@ def build_review_prompt(categories, files, conventions="", part=None):
     lines.append("")
 
     lines.append("# Output format")
-    lines.append("Respond in GitHub-flavored markdown with this exact structure:")
-    lines.append("1. **Summary** — one sentence describing what the PR changes.")
     lines.append(
-        "2. **Verdict** — exactly one of `approve`, `comment`, or `request changes`."
+        "FIRST decide: is there anything worth acting on? If the PR is fine and "
+        f"you have no findings under the categories above, reply with EXACTLY the "
+        f"single word `{NO_FINDINGS_SENTINEL}` — nothing else (no Summary, no "
+        "Verdict, no Findings). Do NOT write a review just to have something to say."
     )
+    lines.append(
+        "Only when there is at least one real finding, respond in GitHub-flavored "
+        "markdown with this exact structure:"
+    )
+    lines.append("1. **Summary** — one sentence describing what the PR changes.")
+    lines.append("2. **Verdict** — one of `comment` or `request changes`.")
     lines.append(
         "3. **Findings** — a bullet per issue, ordered by severity (blocker first), "
         "each in the shape: `[severity] category — path:lines — issue, then the concrete fix`."
     )
-    lines.append(
-        "Report only issues that fall under the categories above. "
-        "If there are no findings, write `No issues found.` under Findings."
-    )
+    lines.append("Report only issues that fall under the categories above.")
     lines.append("")
 
     lines.append("# Diff")
@@ -877,3 +885,39 @@ def build_review_prompt(categories, files, conventions="", part=None):
         lines.append(f.get("patch", ""))
         lines.append("```")
     return "\n".join(lines)
+
+
+def extract_review_text(response, api):
+    """Pull the review text from a raw LLM API response, per wire protocol.
+
+    The Python mirror of ``LLMApi.comment_body_expr`` (an n8n expression), used
+    by the gate Code node so the skip decision runs in-process. Returns "" when
+    the shape is unexpected.
+    """
+    response = response or {}
+    if api == "anthropic":
+        blocks = response.get("content") or []
+        return "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+    choices = response.get("choices") or []
+    if not choices:
+        return ""
+    return ((choices[0] or {}).get("message") or {}).get("content") or ""
+
+
+def review_has_action_items(text):
+    """Whether a review is worth posting as a PR comment.
+
+    True when the review names findings (a severity-tagged bullet) or asks for
+    changes — those get posted. False otherwise: the ``NO_FINDINGS_SENTINEL``
+    alone, or any shape without a tagged finding / request-changes verdict.
+    Errs toward NOT posting (the goal is to suppress noise, since a genuine
+    finding always carries a severity tag or a request-changes verdict).
+    """
+    if not text or not text.strip():
+        return False
+    low = text.lower()
+    if any(f"[{level.lower()}]" in low for level, _ in SEVERITY_LEVELS):
+        return True
+    if text.strip().upper().startswith(NO_FINDINGS_SENTINEL):
+        return False
+    return "request changes" in low or "request_changes" in low

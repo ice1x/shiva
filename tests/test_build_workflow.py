@@ -46,7 +46,7 @@ def test_has_expected_nodes(workflow):
     types = [n["type"] for n in workflow["nodes"]]
     assert "n8n-nodes-base.webhook" in types
     assert types.count("n8n-nodes-base.httpRequest") == 3  # fetch files, LLM, post comment
-    assert types.count("n8n-nodes-base.code") == 2  # check skip, build prompt
+    assert types.count("n8n-nodes-base.code") == 3  # check skip, build prompt, skip-empty gate
     assert "n8n-nodes-base.if" in types
 
 
@@ -533,3 +533,25 @@ def test_agent_workflow_connection_targets_exist(agent_workflow):
             for branch in conn_type:
                 for target in branch:
                     assert target["node"] in names
+
+
+def test_skip_empty_review_gate_present_and_wired(workflow):
+    names = {n["name"] for n in workflow["nodes"]}
+    assert "Skip Empty Review" in names
+    # LLM Review → Skip Empty Review → Post PR Comment
+    assert workflow["connections"]["LLM Review"]["main"][0][0]["node"] == "Skip Empty Review"
+    assert workflow["connections"]["Skip Empty Review"]["main"][0][0]["node"] == "Post PR Comment"
+
+
+def test_gate_node_embeds_decision_logic(workflow):
+    gate = [n for n in workflow["nodes"] if n["name"] == "Skip Empty Review"][0]
+    code = gate["parameters"]["pythonCode"]
+    assert "review_has_action_items" in code and "extract_review_text" in code
+    assert "NO_FINDINGS_SENTINEL" in code
+    assert "return []" in code  # emits no items → Post PR Comment skipped
+
+
+def test_prompt_instructs_the_sentinel(workflow):
+    code = [n for n in workflow["nodes"] if n["name"] == "Filter Diff & Build Prompt"][0]
+    script = code["parameters"]["pythonCode"]
+    assert "APPROVED" in script  # the no-findings sentinel instruction
