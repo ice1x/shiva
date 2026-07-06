@@ -64,7 +64,7 @@ return [{"json": {"skip": should_skip_pr(body), "body": body}}]"""
     )
 
 
-def build_code_node_script(enabled_categories, conventions=""):
+def build_code_node_script(enabled_categories, conventions="", exclude_globs=None):
     """Compose the Python source for the n8n Code node (Python runtime)."""
     functions = (
         inspect.getsource(review.filter_files)
@@ -80,6 +80,9 @@ SEVERITY_LEVELS = {json.dumps(review.SEVERITY_LEVELS, indent=2)}
 CONVENTIONS = {json.dumps(conventions)}
 
 ALLOWED_EXTENSIONS = None  # e.g. [".py"] to review Python files only
+# Skip generated / vendored / lock files before review (task 00017); globs are
+# matched against the full path and the basename. From shiva.config.yml.
+EXCLUDE_GLOBS = {json.dumps(exclude_globs or [], indent=2)}
 DEFAULT_MAX_PATCH_CHARS = 15_000
 # Total patch budget per review pass; a large PR is split across passes (00011).
 DEFAULT_MAX_BATCH_CHARS = {review.DEFAULT_MAX_BATCH_CHARS}"""
@@ -87,7 +90,7 @@ DEFAULT_MAX_BATCH_CHARS = {review.DEFAULT_MAX_BATCH_CHARS}"""
     # per batch). Every item's lineage is pinned to the single webhook item so
     # 'Post PR Comment' can still resolve $('GitHub PR Webhook').item.
     body = """files = [item.get("json") or {} for item in _items]
-kept = filter_files(files, allowed_extensions=ALLOWED_EXTENSIONS)
+kept = filter_files(files, allowed_extensions=ALLOWED_EXTENSIONS, exclude_globs=EXCLUDE_GLOBS)
 batches = split_files_into_batches(kept, max_batch_chars=DEFAULT_MAX_BATCH_CHARS)
 out = []
 for i, batch in enumerate(batches):
@@ -225,6 +228,7 @@ def build_workflow(config_path, override_path=None, agent=False):
     override = yaml.safe_load(Path(override_path).read_text()) if override_path else None
     enabled = review.resolve_categories(config, override)
     conventions = review.resolve_conventions(config, override)
+    exclude_globs = review.resolve_exclude(config, override)
 
     webhook = {
         "id": "webhook",
@@ -318,7 +322,7 @@ def build_workflow(config_path, override_path=None, agent=False):
         "position": None,
         "parameters": {
             "language": "python",
-            "pythonCode": build_code_node_script(enabled, conventions),
+            "pythonCode": build_code_node_script(enabled, conventions, exclude_globs),
         },
     }
 

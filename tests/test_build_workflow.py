@@ -234,6 +234,35 @@ def test_code_node_splits_large_prs_into_batches(workflow):
     assert "pairedItem" in script
 
 
+def test_code_node_embeds_exclude_globs(workflow):
+    """00017: generated / vendored files are skipped before review, so the
+    embedded filter carries the configured exclude globs and applies them."""
+    code = next(n for n in workflow["nodes"] if n["name"] == "Filter Diff & Build Prompt")
+    script = code["parameters"]["pythonCode"]
+    assert "EXCLUDE_GLOBS" in script
+    assert "exclude_globs=EXCLUDE_GLOBS" in script
+    # the shipped defaults must actually travel into the node
+    assert "*.lock" in script
+
+
+def test_build_with_repo_override_replaces_exclude(tmp_path):
+    """00017: a per-repo override's `exclude` replaces the defaults so the repo
+    controls exactly which files are reviewed."""
+    override = tmp_path / ".shiva.yml"
+    override.write_text(
+        "exclude:\n"
+        "  - '*.generated.ts'\n"
+        "categories:\n"
+        "  - id: performance\n"
+        "    enabled: false\n"
+    )
+    workflow = build_workflow(CONFIG_PATH, override_path=override)
+    code = next(n for n in workflow["nodes"] if n["name"] == "Filter Diff & Build Prompt")
+    script = code["parameters"]["pythonCode"]
+    assert "*.generated.ts" in script
+    assert "*.lock" not in script  # defaults replaced by the override
+
+
 def test_llm_node_uses_current_anthropic_api(workflow):
     llm = [
         n
