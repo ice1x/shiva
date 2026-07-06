@@ -54,26 +54,27 @@ llm:
   provider: ollama            # DEFAULT for every repo not listed below
   temperature: 0              # 0 = deterministic, terse, on-topic (0–2)
 
-# Per-repo model mapping: the default `llm` above applies to every repo except
-# those named here, which use their own block instead (same fields as `llm`).
-# Because n8n bakes the provider into the workflow, build a repo's workflow with
-# `build_workflow.py --repo owner/name` to pick it up. A hosted provider needs an
-# API key as an n8n credential (the E2E driver reads it by provider, e.g.
-# $SHIVA_OPENAI_API_KEY, else $SHIVA_LLM_API_KEY), and `e2e.py check` fails until
-# it is set — so the mapping ships EMPTY to keep a fresh clone free and keyless.
-# Each key is a GitHub "owner/repo"; its block has the same fields as `llm`
-# above (provider / model / temperature / endpoint / auth). Add a repo here to
-# route it to a different model than the default; leave it out to use the
-# default. Build that repo's workflow with `build_workflow.py --repo owner/name`.
+# Per-repo model mapping. Each key is a GitHub "owner/repo"; its block has the
+# same fields as `llm` above (provider / model / temperature / endpoint / auth).
+# A repo listed here uses its own model; any repo NOT listed uses the default
+# `llm` (ollama) above. A hosted provider needs its API key in .env (e.g.
+# $SHIVA_OPENAI_API_KEY) — `e2e.py check` fails until every mapped hosted
+# provider has one. Because n8n bakes the provider into the workflow, build each
+# listed repo's workflow with `build_workflow.py --repo owner/name`.
 llm_by_repo:
-  ice1x/graphbook:            # this repo reviews with a hosted model...
+  ice1x/graphbook:
     provider: openai
     model: gpt-4o
     temperature: 0
-  # ice1x/antigram:           # ...another could use a different vendor:
+  ice1x/antigram:
+    provider: openai
+    model: gpt-4o
+    temperature: 0
+  # A repo could use a different vendor instead — e.g.:
+  # ice1x/some-repo:
   #   provider: deepseek
   #   model: deepseek-chat
-  # everyone else falls back to the default `llm` (ollama) above.
+
 
 # Free-form house rules injected into the review prompt (task 00012). Leave
 # empty in the defaults; a target repo sets its own in `.shiva.yml` and it is

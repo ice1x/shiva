@@ -70,6 +70,12 @@ def test_resolve_provider_reads_config_mapping():
     assert resolve_llm_provider("ice1x/anything") == "ollama"
 
 
+def test_resolve_provider_default_when_no_repo():
+    # No repo → the default provider, so `setup` (which has no repo) still
+    # resolves the right per-provider key.
+    assert resolve_llm_provider() == "ollama"
+
+
 # --- mapped_providers (pure, hosted + local) ------------------------------
 
 
