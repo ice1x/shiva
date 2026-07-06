@@ -17,28 +17,41 @@
 
 version: 1
 
-# Which LLM performs the review (task 00019). The review step is no longer
-# vendor-locked to Anthropic: pick any supported provider. DeepSeek, Qwen,
-# OpenAI and Ollama all speak the OpenAI /chat/completions schema; Anthropic
-# uses its Messages API. A target repo's `.shiva.yml` `llm` block REPLACES this
-# one wholesale (override wins), so a repo can point the review at whatever
-# model it already pays for — or a free local Ollama.
+# Which LLM performs the review (task 00019/00020). The review step is
+# vendor-agnostic: pick any provider, or point it at any OpenAI-/Anthropic-
+# compatible endpoint. The DEFAULT is a free, local, keyless model (Ollama) on
+# purpose — a fresh clone costs nothing and locks in no vendor. A target repo's
+# `.shiva.yml` `llm` block REPLACES this one wholesale (override wins).
 #
-#   provider: anthropic | openai | deepseek | qwen | ollama   (default: anthropic)
-#   model:    optional; overrides the provider's default model
-#   endpoint: optional; overrides the provider's default URL (e.g. remote Ollama)
+# Known providers (endpoint + default model + auth are built in):
+#   ollama, lmstudio, vllm   — local, no API key (free)
+#   openrouter               — free & paid models (Bearer key)
+#   openai, deepseek, qwen   — hosted (Bearer key)
+#   anthropic                — hosted (x-api-key)
 #
-# Credentials are attached in the n8n UI as an HTTP Header Auth credential on the
-# 'LLM Review' node (task 00002): 'x-api-key: <key>' for Anthropic,
-# 'Authorization: Bearer <key>' for OpenAI/DeepSeek/Qwen; Ollama needs none.
-# Examples:
+# Fields (all optional):
+#   provider: one of the above; omit to use the default (ollama)
+#   model:    overrides the provider's default model
+#   endpoint: overrides the provider's default URL
+#   api:      wire protocol — openai | anthropic (only for a custom provider)
+#   auth:     none | bearer | x-api-key (only for a custom provider)
+#
+# Custom / self-hosted endpoint (no preset needed — truly vendor-agnostic):
 #   llm:
-#     provider: deepseek
-#   llm:
-#     provider: ollama            # local, no API key
-#     model: llama3.1
+#     api: openai
+#     endpoint: https://llm.mycorp.internal/v1/chat/completions
+#     model: my-model
+#     auth: bearer
+#
+# Credentials are attached in the n8n UI on the 'LLM Review' node (task 00002):
+# 'Authorization: Bearer <key>' for OpenAI/DeepSeek/Qwen/OpenRouter,
+# 'x-api-key: <key>' for Anthropic; the local providers need none.
+#
+# NOTE: the local endpoints use host.docker.internal so the dockerised n8n can
+# reach a model server on the host (see docker-compose.yml). A natively-run n8n
+# should override `endpoint` to use localhost.
 llm:
-  provider: anthropic
+  provider: ollama            # free, local, no API key; set `model:` to taste
 
 # Free-form house rules injected into the review prompt (task 00012). Leave
 # empty in the defaults; a target repo sets its own in `.shiva.yml` and it is

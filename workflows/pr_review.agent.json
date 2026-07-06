@@ -165,9 +165,9 @@
     },
     {
       "id": "chat_model",
-      "name": "Anthropic Chat Model",
-      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
-      "typeVersion": 1.3,
+      "name": "Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
       "position": [
         1020,
         220
@@ -176,13 +176,14 @@
         "model": {
           "__rl": true,
           "mode": "list",
-          "value": "claude-opus-4-8"
+          "value": "llama3.2"
         },
         "options": {
-          "maxTokensToSample": 16000
+          "baseURL": "http://host.docker.internal:11434/v1",
+          "maxTokens": 16000
         }
       },
-      "notes": "Credential: Anthropic API (x-api-key) \u2014 task 00002."
+      "notes": "LLM: ollama (llama3.2); no API key (ollama is local/keyless)."
     },
     {
       "id": "fetch_file_tool",
@@ -293,7 +294,7 @@
         ]
       ]
     },
-    "Anthropic Chat Model": {
+    "Chat Model": {
       "ai_languageModel": [
         [
           {

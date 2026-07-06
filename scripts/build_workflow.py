@@ -132,7 +132,7 @@ return out"""
 # are NOT verifiable without a live n8n LangChain runtime; confirming the agent
 # actually loads and fans out is folded into the E2E task 00008.
 AGENT_NODE = "AI Review Agent"
-CHAT_MODEL_NODE = "Anthropic Chat Model"
+CHAT_MODEL_NODE = "Chat Model"
 FETCH_FILE_TOOL_NODE = "Fetch Repo File"
 
 
@@ -156,42 +156,28 @@ def build_agent_node():
 
 
 def build_chat_model_node(llm):
-    """Chat model sub-node feeding the agent (ai_languageModel), per provider.
+    """Chat-model sub-node feeding the agent (ai_languageModel), per provider.
 
-    Anthropic uses the LangChain `lmChatAnthropic` node; the OpenAI-compatible
-    providers (openai/deepseek/qwen/ollama, task 00019) use `lmChatOpenAi` with
-    the provider's base URL, so the agent variant is no longer Anthropic-only.
+    The wire-protocol object (`LLMApi`) picks the LangChain node type and params
+    — `lmChatAnthropic` for the Anthropic API, `lmChatOpenAi` (with the base URL)
+    for every OpenAI-compatible provider — so the agent variant follows the same
+    vendor-agnostic layer as the single-call review (task 00020).
     """
-    if llm["api"] == "anthropic":
-        return {
-            "id": "chat_model",
-            "name": CHAT_MODEL_NODE,
-            "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
-            "typeVersion": 1.3,
-            "position": None,
-            "parameters": {
-                "model": {"__rl": True, "mode": "list", "value": llm["model"]},
-                "options": {"maxTokensToSample": 16000},
-            },
-            "notes": "Credential: Anthropic API (x-api-key) — task 00002.",
-        }
-    # OpenAI-compatible: lmChatOpenAi with the provider's /v1 base URL.
-    base_url = llm["endpoint"].rsplit("/chat/completions", 1)[0]
-    note = (
-        f"Credential: OpenAI-compatible ({llm['provider']}) at {base_url}"
-        + ("; no API key (local Ollama)." if llm["auth_header"] is None else ".")
+    spec = review.LLM_APIS[llm["api"]].agent_chat_node(llm["model"], llm["endpoint"])
+    auth_header, value_hint = review.llm_auth(llm["auth"])
+    cred = (
+        f"no API key ({llm['provider']} is local/keyless)"
+        if auth_header is None
+        else f"credential '{auth_header}' = '{value_hint}'"
     )
     return {
         "id": "chat_model",
         "name": CHAT_MODEL_NODE,
-        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
-        "typeVersion": 1.2,
+        "type": spec["type"],
+        "typeVersion": spec["typeVersion"],
         "position": None,
-        "parameters": {
-            "model": {"__rl": True, "mode": "list", "value": llm["model"]},
-            "options": {"baseURL": base_url, "maxTokens": 16000},
-        },
-        "notes": note,
+        "parameters": spec["parameters"],
+        "notes": f"LLM: {llm['provider']} ({llm['model']}); {cred}.",
     }
 
 
@@ -251,57 +237,30 @@ def build_fetch_file_tool_node():
 def build_review_request_body(llm):
     """The JSON body for the review HTTP call, as an n8n expression string.
 
-    Anthropic uses the Messages API (adaptive thinking, `content` blocks); the
-    OpenAI-compatible providers use `/chat/completions`. In both the prompt is
-    injected via ``JSON.stringify($json.prompt)`` so it is safely escaped.
+    The wire-protocol object (`LLMApi`) owns the body shape; here we only render
+    it and splice in the prompt via ``JSON.stringify($json.prompt)`` so it is
+    safely escaped.
     """
-    if llm["api"] == "anthropic":
-        body = {
-            "model": llm["model"],
-            "max_tokens": 16000,
-            "thinking": {"type": "adaptive"},
-            "messages": [{"role": "user", "content": "{{ $json.prompt }}"}],
-        }
-    else:  # openai-compatible: openai, deepseek, qwen, ollama
-        body = {
-            "model": llm["model"],
-            "max_tokens": 16000,
-            "messages": [{"role": "user", "content": "{{ $json.prompt }}"}],
-        }
+    body = review.LLM_APIS[llm["api"]].request_body(llm["model"])
     rendered = json.dumps(body, indent=2).replace(
-        '"{{ $json.prompt }}"', "{{ JSON.stringify($json.prompt) }}"
+        f'"{review.PROMPT_SENTINEL}"', "{{ JSON.stringify($json.prompt) }}"
     )
     return "=" + rendered  # n8n expressions require a leading '='
 
 
 def build_review_comment_body(llm):
-    """The n8n expression that extracts the review text into a comment body.
-
-    Anthropic returns a `content` array of typed blocks; OpenAI-compatible APIs
-    return `choices[0].message.content` as a plain string.
-    """
-    if llm["api"] == "anthropic":
-        return (
-            "={{ JSON.stringify({ body: $json.content"
-            ".filter(b => b.type === 'text').map(b => b.text).join('\\n') }) }}"
-        )
-    return "={{ JSON.stringify({ body: $json.choices[0].message.content }) }}"
+    """The n8n expression that extracts the review text into a comment body."""
+    return review.LLM_APIS[llm["api"]].comment_body_expr()
 
 
 def build_review_node(llm):
     """The single-call review HTTP node, targeting the configured provider."""
-    headers = [{"name": "content-type", "value": "application/json"}]
-    if llm["api"] == "anthropic":
-        # anthropic-version is required by the Messages API; not sent otherwise.
-        headers.insert(0, {"name": "anthropic-version", "value": "2023-06-01"})
-    if llm["auth_header"] is None:
-        cred_note = f"No API key required ({llm['provider']} is local)."
-    elif llm["auth_header"] == "Authorization":
-        cred_note = "Credential: HTTP Header Auth 'Authorization' = 'Bearer <API key>'."
+    api = review.LLM_APIS[llm["api"]]
+    auth_header, value_hint = review.llm_auth(llm["auth"])
+    if auth_header is None:
+        cred_note = f"No API key required ({llm['provider']} is local/keyless)."
     else:
-        cred_note = (
-            f"Credential: HTTP Header Auth '{llm['auth_header']}' = '<API key>'."
-        )
+        cred_note = f"Credential: HTTP Header Auth '{auth_header}' = '{value_hint}'."
     node = {
         "id": "llm_review",
         "name": "LLM Review",
@@ -312,14 +271,14 @@ def build_review_node(llm):
             "method": "POST",
             "url": llm["endpoint"],
             "sendHeaders": True,
-            "headerParameters": {"parameters": headers},
+            "headerParameters": {"parameters": api.http_headers()},
             "sendBody": True,
             "specifyBody": "json",
             "jsonBody": build_review_request_body(llm),
         },
         "notes": f"LLM: {llm['provider']} ({llm['model']}). {cred_note}",
     }
-    if llm["auth_header"] is not None:
+    if auth_header is not None:
         node["parameters"]["authentication"] = "genericCredentialType"
         node["parameters"]["genericAuthType"] = "httpHeaderAuth"
     return node
