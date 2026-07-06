@@ -290,6 +290,50 @@ up front without touching anything:
 # check: FAIL — see above.
 ```
 
+## Operating the pipeline (on/off, logs)
+
+The pipeline is **live** when all of these are up at once; if any drops (you
+close the tunnel terminal, reboot, stop n8n) reviews stop until it is back:
+
+1. the n8n containers — `docker compose up -d` (they carry `restart:
+   unless-stopped`, so they survive a reboot once Docker starts)
+2. the model server — a local Ollama for keyless repos; nothing extra for a
+   hosted provider
+3. the public tunnel — `./scripts/dev_tunnel.sh`, kept running
+4. the workflow **activated** and each repo's webhook registered — `scripts/e2e.py
+   setup` (and `live` registers the webhook)
+
+### On / off
+
+Fastest is the **Active toggle in the n8n UI**: open `http://localhost:5678`,
+open the **Shiva PR Review Agent** workflow, flip **Active** (top-right). Or from
+the CLI (restart after, or the running process keeps serving the old state):
+
+```bash
+docker exec shiva-n8n n8n update:workflow --id=ShivaPrReview001 --active=false
+docker restart shiva-n8n     # re-register the production webhook after a change
+```
+
+Other switches: **Ctrl-C the tunnel** (GitHub can no longer reach n8n — off, but
+the engine stays up), toggle/delete a repo's hook under **Settings → Webhooks**
+(disable one repo), or `docker compose stop` to stop everything.
+
+### Logs / monitoring
+
+- **n8n → Executions** (`http://localhost:5678` → *Executions*) — the primary
+  log: one entry per run, every node, and the exact error where a run failed.
+- **Container logs** — `docker compose logs -f n8n` (engine, webhook
+  registration) and `docker logs shiva-n8n-runners` (the Python Code node).
+- **GitHub → repo → Settings → Webhooks → Recent Deliveries** — what GitHub sent
+  and the response code; the first place to look when *no* review appears (404 =
+  workflow inactive / not re-registered, 200 = it reached n8n).
+- The tunnel's terminal shows request logs.
+
+**No review appeared?** Check Recent Deliveries first: a 404 means the workflow
+isn't serving (run `setup`, or restart n8n); a 200 means it reached n8n, so open
+the red run in **Executions** to see which node failed (401 = bad/missing API
+key, connection refused = the model server is down).
+
 ## Workflow as Code
 
 The n8n workflow is generated, not hand-built. Sources of truth:
