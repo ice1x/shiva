@@ -3,7 +3,7 @@
 import pytest
 
 import e2e
-from e2e import check_providers, resolve_llm_provider, resolve_llm_token
+from e2e import check_providers, resolve_llm_provider, resolve_llm_token  # noqa: F401
 
 from shiva_agent.e2e import hosted_providers_in_config, mapped_providers
 
@@ -118,3 +118,20 @@ def test_check_local_only_needs_reachable_server(monkeypatch):
     rows = check_providers({"llm": {"provider": "ollama"}})
     assert [r[0] for r in rows] == ["ollama"]
     assert rows[0][2] is True
+
+
+def test_only_provider_scopes_the_check(monkeypatch):
+    # Deploying an openai repo must NOT be blocked by a down local default.
+    monkeypatch.setattr(e2e, "local_server_reachable", lambda endpoint: False)
+    monkeypatch.setenv("SHIVA_OPENAI_API_KEY", "k")
+    rows = check_providers(MIXED, only_provider="openai")
+    assert [r[0] for r in rows] == ["openai"]  # ollama (down) not checked
+    assert rows[0][2] is True
+
+
+def test_no_filter_checks_everything(monkeypatch):
+    monkeypatch.setattr(e2e, "local_server_reachable", lambda endpoint: True)
+    monkeypatch.setenv("SHIVA_OPENAI_API_KEY", "k")
+    monkeypatch.setenv("SHIVA_DEEPSEEK_API_KEY", "k")
+    providers = {r[0] for r in check_providers(MIXED)}
+    assert providers == {"ollama", "openai", "deepseek"}
