@@ -796,6 +796,28 @@ def build_review_prompt(categories, files, conventions="", part=None):
         "restating the diff, no filler. Say only what matters.",
         "",
     ]
+    # Review discipline: accuracy + no-nitpick rules to curb the failure modes
+    # seen on real reviews (hallucinated line numbers, misread code, style/rename
+    # nitpicks, suggestions that fight intentional design). See data/README.md.
+    lines.append("# Review discipline")
+    lines.append(
+        "- Flag ONLY what you can tie to specific code shown in the diff; quote or "
+        "name the exact symbol. Never infer or assume code you cannot see."
+    )
+    lines.append(
+        "- Cite exact line numbers from the diff. If you are not certain of the line, "
+        "omit the number rather than guess."
+    )
+    lines.append(
+        "- Do NOT raise renames, file/module splits, or micro-optimizations unless "
+        "they fix a concrete correctness or clarity bug. Style nits are out of scope "
+        "unless a Code Style category is enabled above."
+    )
+    lines.append(
+        "- A wrong or speculative finding is worse than a missed nit: prefer fewer, "
+        "verifiable findings, and treat the repository conventions below as intentional."
+    )
+    lines.append("")
     if part is not None:
         index, count = part
         if count > 1:
