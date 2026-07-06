@@ -45,6 +45,11 @@ REVIEWABLE_ACTIONS = frozenset({"opened", "reopened", "ready_for_review", "synch
 # so it is free to use classes.
 PROMPT_SENTINEL = "__SHIVA_PROMPT__"  # replaced with the n8n prompt expression at build time
 MAX_OUTPUT_TOKENS = 16000
+# Sampling temperature for the review. Default 0 → deterministic, terse, on-topic
+# output (a review wants precision, not creativity). Overridable per repo via
+# `llm.temperature`. Applied to the OpenAI-family body; Anthropic keeps adaptive
+# thinking, which is incompatible with a fixed temperature.
+DEFAULT_TEMPERATURE = 0
 
 
 class LLMApi:
@@ -57,7 +62,7 @@ class LLMApi:
 
     api = ""
 
-    def request_body(self, model):
+    def request_body(self, model, temperature=DEFAULT_TEMPERATURE):
         """Return the JSON request body, with PROMPT_SENTINEL where the prompt goes."""
         raise NotImplementedError
 
@@ -79,7 +84,9 @@ class AnthropicApi(LLMApi):
 
     api = "anthropic"
 
-    def request_body(self, model):
+    def request_body(self, model, temperature=DEFAULT_TEMPERATURE):
+        # Anthropic's adaptive thinking is incompatible with a fixed temperature,
+        # so `temperature` is intentionally not sent here.
         return {
             "model": model,
             "max_tokens": MAX_OUTPUT_TOKENS,
@@ -116,10 +123,11 @@ class OpenAIApi(LLMApi):
 
     api = "openai"
 
-    def request_body(self, model):
+    def request_body(self, model, temperature=DEFAULT_TEMPERATURE):
         return {
             "model": model,
             "max_tokens": MAX_OUTPUT_TOKENS,
+            "temperature": temperature,
             "messages": [{"role": "user", "content": PROMPT_SENTINEL}],
         }
 
@@ -335,6 +343,23 @@ def validate_config(config, partial=False, require_enabled=False):
 
     validate_llm(config.get("llm"))
 
+    by_repo = config.get("llm_by_repo")
+    if by_repo is not None:
+        if not isinstance(by_repo, dict):
+            raise ConfigError(
+                f"llm_by_repo must be a mapping of 'owner/repo' → llm block, "
+                f"got {type(by_repo).__name__}"
+            )
+        for repo, block in by_repo.items():
+            if not isinstance(repo, str) or "/" not in repo:
+                raise ConfigError(
+                    f"llm_by_repo key {repo!r} must be an 'owner/repo' string"
+                )
+            try:
+                validate_llm(block)
+            except ConfigError as exc:
+                raise ConfigError(f"llm_by_repo[{repo!r}]: {exc}") from exc
+
     categories = config.get("categories", [])
     if not isinstance(categories, list):
         raise ConfigError(
@@ -414,6 +439,14 @@ def validate_llm(llm):
         known = ", ".join(sorted(AUTH_SCHEMES))
         raise ConfigError(f"llm.auth {auth!r} is not supported; choose one of: {known}")
 
+    temperature = llm.get("temperature")
+    if temperature is not None and (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not 0 <= temperature <= 2
+    ):
+        raise ConfigError("llm.temperature must be a number between 0 and 2")
+
     provider = llm.get("provider")
     if provider is not None and provider not in LLM_PROVIDERS:
         # Unknown name is allowed only as an inline/custom provider, which must
@@ -427,26 +460,38 @@ def validate_llm(llm):
             )
 
 
-def resolve_llm(config, override=None):
+def resolve_llm(config, override=None, repo=None):
     """Resolve the effective LLM provider spec (task 00020).
 
-    Vendor-agnostic: the winning `llm` block (override *replaces* the base
-    wholesale, the same rule as `conventions`/`exclude`) either names a known
-    `provider` — with optional `model`/`endpoint`/`auth` overrides — or defines a
-    provider inline via `api` + `endpoint` (+ `model`, + `auth`) for any
+    Vendor-agnostic: the winning `llm` block either names a known `provider` —
+    with optional `model`/`endpoint`/`auth`/`temperature` overrides — or defines
+    a provider inline via `api` + `endpoint` (+ `model`, + `auth`) for any
     compatible server. An empty or absent block yields `DEFAULT_LLM_PROVIDER`, a
-    free, local, keyless provider, so a fresh clone costs nothing and locks in no
-    vendor.
+    free, local, keyless provider, so a fresh clone costs nothing.
 
-    Returns ``{provider, api, endpoint, model, auth}`` where `api` is the wire
-    protocol (a key of `LLM_APIS`) and `auth` is a key of `AUTH_SCHEMES`.
+    Precedence for the winning block (each *replaces* the base wholesale, the
+    same rule as `conventions`/`exclude`):
+
+    1. an explicit ``override`` (a target repo's `.shiva.yml` `llm` block);
+    2. a per-repo entry ``config["llm_by_repo"][repo]`` when ``repo`` is given —
+       the central "default model + per-repo models that differ" mapping, so one
+       config picks Ollama by default but e.g. OpenAI for `owner/repo`;
+    3. the default ``config["llm"]``.
+
+    Because n8n bakes the provider (and its credential) into the workflow at
+    build time, this is resolved per built workflow — `build_workflow.py --repo
+    owner/name` selects the mapped provider for that repo's workflow.
+
+    Returns ``{provider, api, endpoint, model, auth, temperature}`` where `api`
+    is the wire protocol (a key of `LLM_APIS`) and `auth` a key of `AUTH_SCHEMES`.
     """
-    for src in (override, config):
-        block = (src or {}).get("llm")
-        if block:
-            break
+    by_repo = (config or {}).get("llm_by_repo") or {}
+    if (override or {}).get("llm"):
+        block = override["llm"]
+    elif repo is not None and repo in by_repo:
+        block = by_repo[repo]
     else:
-        block = {}
+        block = (config or {}).get("llm") or {}
     validate_llm(block)
 
     provider = block.get("provider")
@@ -473,7 +518,15 @@ def resolve_llm(config, override=None):
             raise ConfigError(
                 f"custom llm provider {name!r} must set: {', '.join(missing)}"
             )
-    return {"provider": name, "api": api, "endpoint": endpoint, "model": model, "auth": auth}
+    temperature = block.get("temperature", DEFAULT_TEMPERATURE)
+    return {
+        "provider": name,
+        "api": api,
+        "endpoint": endpoint,
+        "model": model,
+        "auth": auth,
+        "temperature": temperature,
+    }
 
 
 def llm_auth(auth):
@@ -571,6 +624,96 @@ def resolve_exclude(config, override=None):
     return []
 
 
+def match_glob(name, pattern):
+    """fnmatch-style wildcard match implemented without any stdlib import.
+
+    Supports the glob syntax the exclude patterns use: ``*`` (any run, including
+    ``/``), ``?`` (one char), and ``[seq]`` / ``[!seq]`` character classes.
+    Case-sensitive and anchored to the whole string, matching ``fnmatch``
+    semantics on POSIX — which is what the n8n Linux Python runner uses.
+
+    Hand-rolled because that runner's sandbox disallows *every* stdlib import
+    ("Allowed stdlib modules: none"), so neither ``fnmatch`` nor ``re`` can be
+    imported inside the generated Code node (task 00017). This function's source
+    is embedded verbatim into the node by scripts/build_workflow.py.
+    """
+    # Tokenize the pattern once: ("star",) | ("any",) | ("lit", ch)
+    # | ("set", negate, items) where items are chars or (lo, hi) ranges.
+    tokens = []
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "*":
+            tokens.append(("star",))
+            i += 1
+        elif c == "?":
+            tokens.append(("any",))
+            i += 1
+        elif c == "[":
+            j = i + 1
+            negate = False
+            if j < n and pattern[j] in "!^":
+                negate = True
+                j += 1
+            items, first = [], True
+            while j < n and (pattern[j] != "]" or first):
+                first = False
+                if j + 2 < n and pattern[j + 1] == "-" and pattern[j + 2] != "]":
+                    items.append((pattern[j], pattern[j + 2]))
+                    j += 3
+                else:
+                    items.append(pattern[j])
+                    j += 1
+            if j >= n:  # unterminated "[" — treat it as a literal
+                tokens.append(("lit", "["))
+                i += 1
+                continue
+            tokens.append(("set", negate, items))
+            i = j + 1
+        else:
+            tokens.append(("lit", c))
+            i += 1
+
+    def _matches(ch, token):
+        kind = token[0]
+        if kind == "any":
+            return True
+        if kind == "lit":
+            return ch == token[1]
+        _, negate, items = token  # ("set", negate, items)
+        hit = False
+        for it in items:
+            if isinstance(it, tuple):
+                if it[0] <= ch <= it[1]:
+                    hit = True
+                    break
+            elif ch == it:
+                hit = True
+                break
+        return hit != negate
+
+    # Greedy wildcard match with backtracking on the last "*".
+    ti = ni = 0
+    star_ti, star_ni = -1, 0
+    nt, nn = len(tokens), len(name)
+    while ni < nn:
+        if ti < nt and tokens[ti][0] == "star":
+            star_ti, star_ni = ti, ni
+            ti += 1
+        elif ti < nt and tokens[ti][0] != "star" and _matches(name[ni], tokens[ti]):
+            ti += 1
+            ni += 1
+        elif star_ti != -1:
+            ti = star_ti + 1
+            star_ni += 1
+            ni = star_ni
+        else:
+            return False
+    while ti < nt and tokens[ti][0] == "star":
+        ti += 1
+    return ti == nt
+
+
 def filter_files(
     files, allowed_extensions=None, max_patch_chars=DEFAULT_MAX_PATCH_CHARS, exclude_globs=None
 ):
@@ -584,8 +727,6 @@ def filter_files(
     `package-lock.json` excludes the file at any depth while `*/dist/*` targets
     a directory.
     """
-    from fnmatch import fnmatch
-
     kept = []
     for f in files:
         patch = f.get("patch")
@@ -596,7 +737,7 @@ def filter_files(
         name = f.get("filename", "")
         if exclude_globs:
             base = name.rsplit("/", 1)[-1]
-            if any(fnmatch(name, g) or fnmatch(base, g) for g in exclude_globs):
+            if any(match_glob(name, g) or match_glob(base, g) for g in exclude_globs):
                 continue
         if len(patch) > max_patch_chars:
             continue
@@ -651,6 +792,8 @@ def build_review_prompt(categories, files, conventions="", part=None):
     lines = [
         "You are a senior code reviewer. Review the pull request diff below.",
         'Evaluate the changes ONLY against the categories under "Review categories".',
+        "Be terse and specific: every finding one line, concrete, no preamble, no "
+        "restating the diff, no filler. Say only what matters.",
         "",
     ]
     if part is not None:

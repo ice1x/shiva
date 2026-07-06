@@ -65,7 +65,12 @@ return [{"json": {"skip": should_skip_pr(body), "body": body}}]"""
 def build_code_node_script(enabled_categories, conventions="", exclude_globs=None):
     """Compose the Python source for the n8n Code node (Python runtime)."""
     functions = (
-        inspect.getsource(review.filter_files)
+        # match_glob must precede filter_files, which calls it. It replaces a
+        # `from fnmatch import fnmatch` the Python runner sandbox rejects (it
+        # disallows every stdlib import) — see review.match_glob (task 00017).
+        inspect.getsource(review.match_glob)
+        + "\n"
+        + inspect.getsource(review.filter_files)
         + "\n"
         + inspect.getsource(review.split_files_into_batches)
         + "\n"
@@ -241,7 +246,9 @@ def build_review_request_body(llm):
     it and splice in the prompt via ``JSON.stringify($json.prompt)`` so it is
     safely escaped.
     """
-    body = review.LLM_APIS[llm["api"]].request_body(llm["model"])
+    body = review.LLM_APIS[llm["api"]].request_body(
+        llm["model"], temperature=llm.get("temperature", review.DEFAULT_TEMPERATURE)
+    )
     rendered = json.dumps(body, indent=2).replace(
         f'"{review.PROMPT_SENTINEL}"', "{{ JSON.stringify($json.prompt) }}"
     )
@@ -284,12 +291,17 @@ def build_review_node(llm):
     return node
 
 
-def build_workflow(config_path, override_path=None, agent=False):
+def build_workflow(config_path, override_path=None, agent=False, repo=None):
     """Build the n8n workflow from the default config.
 
     When `override_path` points at a target repo's `.shiva.yml`, its categories
     are merged over the defaults by `id` (task 00014) before being embedded, so
     a per-repo review configuration can be baked into a repo-specific workflow.
+
+    When `repo` (an ``owner/name``) is given, the LLM provider is resolved from
+    the config's `llm_by_repo` mapping — the "default model + per-repo models"
+    map — falling back to the default `llm`. Because n8n bakes the provider into
+    the node, each mapped repo gets its own built workflow.
 
     When `agent` is true, the single-call `LLM Review` node is replaced by an
     AI Agent node wired to a chat model and a `fetch_repo_file` tool, so the
@@ -301,7 +313,7 @@ def build_workflow(config_path, override_path=None, agent=False):
     enabled = review.resolve_categories(config, override)
     conventions = review.resolve_conventions(config, override)
     exclude_globs = review.resolve_exclude(config, override)
-    llm = review.resolve_llm(config, override)
+    llm = review.resolve_llm(config, override, repo=repo)
 
     webhook = {
         "id": "webhook",
@@ -517,6 +529,12 @@ def main(argv=None):
         help="build the AI Agent variant (model can fetch extra repo files, task 00013)",
     )
     parser.add_argument(
+        "--repo",
+        metavar="OWNER/NAME",
+        default=None,
+        help="resolve the LLM from the config's llm_by_repo mapping for this repo",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         metavar="PATH",
@@ -531,7 +549,10 @@ def main(argv=None):
     output = args.output or (AGENT_OUTPUT_PATH if args.agent else OUTPUT_PATH)
     try:
         workflow = build_workflow(
-            REPO_ROOT / "shiva.config.yml", override_path=args.override, agent=args.agent
+            REPO_ROOT / "shiva.config.yml",
+            override_path=args.override,
+            agent=args.agent,
+            repo=args.repo,
         )
     except review.ConfigError as exc:
         # A malformed config (usually a hand-written --override .shiva.yml) should

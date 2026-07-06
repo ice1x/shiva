@@ -52,6 +52,19 @@ version: 1
 # should override `endpoint` to use localhost.
 llm:
   provider: ollama            # free, local, no API key; set `model:` to taste
+  temperature: 0              # 0 = deterministic, terse, on-topic (0–2)
+
+# Per-repo model mapping: the default `llm` above applies to every repo except
+# those named here, which use their own block instead (same fields as `llm`).
+# Because n8n bakes the provider into the workflow, build a repo's workflow with
+# `build_workflow.py --repo owner/name` to pick up its entry. A hosted provider
+# needs an API key as an n8n credential (the E2E driver reads it by provider,
+# e.g. $SHIVA_OPENAI_API_KEY, else $SHIVA_LLM_API_KEY).
+llm_by_repo:
+  ice1x/graphbook:
+    provider: openai
+    model: gpt-4o
+    temperature: 0
 
 # Free-form house rules injected into the review prompt (task 00012). Leave
 # empty in the defaults; a target repo sets its own in `.shiva.yml` and it is
