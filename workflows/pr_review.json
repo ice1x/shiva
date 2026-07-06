@@ -122,14 +122,10 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "https://api.anthropic.com/v1/messages",
+        "url": "http://host.docker.internal:11434/v1/chat/completions",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "anthropic-version",
-              "value": "2023-06-01"
-            },
             {
               "name": "content-type",
               "value": "application/json"
@@ -138,11 +134,9 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"model\": \"claude-opus-4-8\",\n  \"max_tokens\": 16000,\n  \"thinking\": {\n    \"type\": \"adaptive\"\n  },\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.prompt) }}\n    }\n  ]\n}",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth"
+        "jsonBody": "={\n  \"model\": \"llama3.2\",\n  \"max_tokens\": 16000,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.prompt) }}\n    }\n  ]\n}"
       },
-      "notes": "LLM: anthropic (claude-opus-4-8). Credential: HTTP Header Auth 'x-api-key' = '<API key>'."
+      "notes": "LLM: ollama (llama3.2). No API key required (ollama is local/keyless)."
     },
     {
       "id": "post_comment",
@@ -173,7 +167,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ body: $json.content.filter(b => b.type === 'text').map(b => b.text).join('\\n') }) }}",
+        "jsonBody": "={{ JSON.stringify({ body: $json.choices[0].message.content }) }}",
         "options": {}
       },
       "notes": "Same GitHub PAT credential as 'Fetch PR Files'."
