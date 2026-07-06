@@ -91,6 +91,13 @@ DEFAULT_MAX_BATCH_CHARS = {review.DEFAULT_MAX_BATCH_CHARS}"""
     # 'Post PR Comment' can still resolve $('GitHub PR Webhook').item.
     body = """files = [item.get("json") or {} for item in _items]
 kept = filter_files(files, allowed_extensions=ALLOWED_EXTENSIONS, exclude_globs=EXCLUDE_GLOBS)
+if not kept:
+    # Every changed file was filtered out — binary, removed, oversized, or an
+    # excluded generated/vendored/lock file (task 00017). Emit no items so n8n
+    # skips the Claude call and Post PR Comment entirely (task 00018): no paid
+    # review and no noise comment on a PR with nothing to review, mirroring the
+    # empty false-branch of the skip gate (task 00010).
+    return []
 batches = split_files_into_batches(kept, max_batch_chars=DEFAULT_MAX_BATCH_CHARS)
 out = []
 for i, batch in enumerate(batches):

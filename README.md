@@ -131,6 +131,14 @@ and add your own. The list is validated with the rest of the config
 (task `00015`): a non-list `exclude`, or an empty/blank pattern, fails the build
 with a clear message.
 
+If **every** changed file is filtered out — a PR that only bumps `poetry.lock`,
+touches binaries, or deletes files — the Code node emits **no** items at all
+(task `00018`), so n8n skips the Claude call and the comment entirely. Nothing is
+reviewed, nothing is paid for, and no "no reviewable files" comment is posted;
+this mirrors the empty false-branch of the [skip gate](#task-list) (task `00010`)
+and completes `00017`'s promise of never spending a review call on machine-generated
+noise.
+
 ## Run n8n locally
 
 ```bash
@@ -259,6 +267,7 @@ Ordered by priority (highest first). Check off as you go.
 - [x] `00015` — Validate the review config: a malformed `.shiva.yml` (missing `name`/`prompt`, duplicate `id`, non-boolean `enabled`, wrong shape) fails the build with a clear, actionable message via [`validate_config`](src/shiva_agent/review.py) instead of an opaque `KeyError` — see [Per-repo configuration](#per-repo-configuration)
 - [x] `00016` — Require at least one enabled category: an override that disables every category fails the build (`no review categories are enabled ...`) instead of silently producing a reviewer whose prompt has an empty "Review categories" section — see [Per-repo configuration](#per-repo-configuration)
 - [x] `00017` — Skip generated files: lock files, source maps, minified bundles, and vendored/generated code are dropped before review via a configurable `exclude` glob list in [`shiva.config.yml`](shiva.config.yml), so a paid LLM call is never spent reviewing machine-generated noise — see [Excluded files](#excluded-files)
+- [x] `00018` — Skip the review call when nothing survives filtering: if every changed file is dropped (binary, removed, oversized, or an excluded generated/vendored/lock file), the Code node emits no items so n8n skips the Claude call and the comment entirely — no paid review, no "no reviewable files" noise comment — see [Excluded files](#excluded-files)
 
 ## Definition of Done (MVP)
 

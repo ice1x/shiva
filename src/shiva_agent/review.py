@@ -329,8 +329,9 @@ def split_files_into_batches(files, max_batch_chars=DEFAULT_MAX_BATCH_CHARS):
     instead of being dropped — filter_files has already capped any single patch
     at DEFAULT_MAX_PATCH_CHARS, so each pass stays bounded.
 
-    Returns a list of file-lists. An empty input yields a single empty batch,
-    so the caller still emits one "no reviewable files" review.
+    Returns a list of file-lists. An empty input yields a single empty batch;
+    the generated Code node filters out the no-reviewable-files case before it
+    batches (task 00018), so in practice this is only reached with ≥1 file.
     """
     batches = []
     current = []

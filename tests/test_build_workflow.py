@@ -23,6 +23,21 @@ def node_by_type(workflow, node_type):
     return [n for n in workflow["nodes"] if n["type"] == node_type]
 
 
+def run_code_node_body(workflow, items):
+    """Execute the 'Filter Diff & Build Prompt' node body against mock `_items`.
+
+    The generated script ends in a top-level `return` (n8n Code-node semantics),
+    which is illegal at module scope, so it is wrapped in a function before
+    exec — the same shape the native runner gives it. Returns the emitted items.
+    """
+    code = next(n for n in workflow["nodes"] if n["name"] == "Filter Diff & Build Prompt")
+    script = code["parameters"]["pythonCode"]
+    indented = "\n".join("    " + line for line in script.splitlines())
+    namespace = {}
+    exec("def _run(_items):\n" + indented, namespace)  # noqa: S102 — test-only exec of our own generated code
+    return namespace["_run"]([{"json": f} for f in items])
+
+
 def test_workflow_is_json_serializable(workflow):
     json.dumps(workflow)
 
@@ -261,6 +276,42 @@ def test_build_with_repo_override_replaces_exclude(tmp_path):
     script = code["parameters"]["pythonCode"]
     assert "*.generated.ts" in script
     assert "*.lock" not in script  # defaults replaced by the override
+
+
+def test_code_node_emits_nothing_when_no_files_survive_filtering(workflow):
+    """00018: a PR whose changed files are all filtered out (binary, removed, or
+    an excluded generated/vendored/lock file) must emit ZERO items, so n8n skips
+    the Claude call and the comment — no paid review, no noise comment. Directly
+    executes the generated node body against such a PR."""
+    out = run_code_node_body(
+        workflow,
+        [
+            {"filename": "poetry.lock", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"},
+            {"filename": "web/dist/bundle.min.js", "status": "modified", "patch": "@@ -1 +1 @@\n-x\n+y"},
+            {"filename": "assets/logo.png", "status": "modified"},  # binary: no patch
+            {"filename": "old.py", "status": "removed", "patch": "@@ -1 +0 @@\n-gone"},
+        ],
+    )
+    assert out == []
+
+
+def test_code_node_reviews_only_the_surviving_files(workflow):
+    """00018 regression: when at least one file survives filtering, the node
+    still emits a review item, and its counts reflect that the excluded files
+    were dropped before the (paid) review — not reviewed, but counted as seen."""
+    out = run_code_node_body(
+        workflow,
+        [
+            {"filename": "poetry.lock", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"},
+            {"filename": "src/app.py", "status": "modified", "patch": "@@ -1 +1 @@\n-old\n+new"},
+        ],
+    )
+    assert len(out) == 1
+    assert out[0]["json"]["reviewed_files"] == 1  # only app.py
+    assert out[0]["json"]["total_files"] == 2  # both files were seen
+    assert "src/app.py" in out[0]["json"]["prompt"]
+    assert "poetry.lock" not in out[0]["json"]["prompt"]
+    assert out[0]["pairedItem"] == {"item": 0}
 
 
 def test_llm_node_uses_current_anthropic_api(workflow):
