@@ -25,6 +25,29 @@ version: 1
 #     Never log secrets or PII. Public APIs need docstrings.
 conventions: ""
 
+# Files skipped before review (task 00017). Generated, vendored, and lock files
+# carry a diff but are not worth a paid LLM review, so any file whose path
+# matches one of these globs is dropped by `filter_files`. Each glob is matched
+# against both the full repository-relative path and the bare basename (fnmatch
+# semantics), so `package-lock.json` matches at any depth while `*/dist/*`
+# targets a directory. A target repo's `.shiva.yml` `exclude` list REPLACES
+# these defaults wholesale (override wins), so copy the ones you still want.
+exclude:
+  - "*.lock"                # poetry.lock, Cargo.lock, yarn.lock, Gemfile.lock, ...
+  - "package-lock.json"
+  - "pnpm-lock.yaml"
+  - "go.sum"
+  - "*.min.js"
+  - "*.min.css"
+  - "*.map"                 # source maps
+  - "*.pb.go"               # generated protobuf
+  - "*_pb2.py"              # generated protobuf (python)
+  - "*.generated.*"
+  - "*/node_modules/*"
+  - "*/vendor/*"
+  - "*/dist/*"
+  - "*/build/*"
+
 categories:
   - id: structural
     name: Structural Review

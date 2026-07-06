@@ -13,6 +13,7 @@ from shiva_agent.review import (
     merge_config,
     resolve_categories,
     resolve_conventions,
+    resolve_exclude,
     should_skip_pr,
     split_files_into_batches,
     validate_config,
@@ -79,6 +80,27 @@ class TestFilterFiles:
         removed = make_file("old.py", status="removed")
         kept = filter_files([removed, make_file("new.py")])
         assert [f["filename"] for f in kept] == ["new.py"]
+
+    def test_no_exclude_globs_keeps_everything(self):
+        files = [make_file("poetry.lock"), make_file("app/main.py")]
+        assert len(filter_files(files, exclude_globs=None)) == 2
+
+    def test_excludes_files_matching_a_glob(self):
+        # 00017: machine-generated / vendored files waste a paid LLM call.
+        files = [make_file("poetry.lock"), make_file("app/main.py")]
+        kept = filter_files(files, exclude_globs=["*.lock"])
+        assert [f["filename"] for f in kept] == ["app/main.py"]
+
+    def test_exclude_matches_basename_at_any_depth(self):
+        # a bare basename pattern excludes the file wherever it sits in the tree
+        files = [make_file("frontend/package-lock.json"), make_file("app/main.py")]
+        kept = filter_files(files, exclude_globs=["package-lock.json"])
+        assert [f["filename"] for f in kept] == ["app/main.py"]
+
+    def test_exclude_matches_a_directory_path_glob(self):
+        files = [make_file("web/dist/bundle.js"), make_file("web/src/app.js")]
+        kept = filter_files(files, exclude_globs=["*/dist/*"])
+        assert [f["filename"] for f in kept] == ["web/src/app.js"]
 
 
 class TestSplitFilesIntoBatches:
@@ -387,6 +409,19 @@ class TestValidateConfig:
             validate_config({"conventions": ["not", "a", "string"], "categories": []})
         assert "conventions" in str(exc.value)
 
+    def test_exclude_must_be_a_list_when_present(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_config({"exclude": "*.lock", "categories": []})
+        assert "exclude" in str(exc.value)
+
+    def test_exclude_entries_must_be_non_empty_strings(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_config({"exclude": ["*.lock", "  "], "categories": []})
+        assert "exclude" in str(exc.value)
+
+    def test_exclude_is_optional(self):
+        assert validate_config({"categories": []}) is None
+
     def test_does_not_require_enabled_categories_by_default(self):
         # Structural validation alone tolerates an all-disabled config; the
         # "at least one enabled" rule is opt-in via require_enabled (00016).
@@ -515,6 +550,32 @@ class TestResolveConventions:
 
     def test_strips_surrounding_whitespace(self):
         assert resolve_conventions({"conventions": "\n  Trim me.\n"}) == "Trim me."
+
+
+class TestResolveExclude:
+    def test_returns_empty_when_neither_provides(self):
+        assert resolve_exclude({"version": 1}) == []
+
+    def test_returns_base_excludes_when_no_override(self):
+        assert resolve_exclude({"exclude": ["*.lock"]}) == ["*.lock"]
+
+    def test_override_replaces_base(self):
+        # like conventions, a repo's `exclude` replaces the defaults wholesale,
+        # so the repo keeps full control of what is reviewed.
+        merged = resolve_exclude({"exclude": ["*.lock"]}, {"exclude": ["*.min.js"]})
+        assert merged == ["*.min.js"]
+
+    def test_falls_back_to_base_when_override_omits(self):
+        assert resolve_exclude({"exclude": ["*.lock"]}, {"categories": []}) == ["*.lock"]
+
+    def test_empty_override_list_falls_back_to_base(self):
+        assert resolve_exclude({"exclude": ["*.lock"]}, {"exclude": []}) == ["*.lock"]
+
+    def test_returns_a_copy_not_the_config_list(self):
+        base = {"exclude": ["*.lock"]}
+        result = resolve_exclude(base)
+        result.append("*.min.js")
+        assert base["exclude"] == ["*.lock"]
 
 
 class TestBuildAgentSystemPrompt:

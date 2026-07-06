@@ -99,6 +99,38 @@ Auto-fetching `.shiva.yml` from the target repo at run time (one shared workflow
 for all repos) is a future step: it needs YAML parsing inside the n8n Python
 Code node, which the stock native runner does not provide.
 
+## Excluded files
+
+Some changed files carry a diff but are not worth a paid LLM review — lock files
+(`poetry.lock`, `package-lock.json`, …), source maps, minified bundles, and
+vendored or generated code. `filter_files` drops any file whose path matches one
+of the `exclude` glob patterns in [`shiva.config.yml`](shiva.config.yml)
+(task `00017`) *before* the diff is batched and sent to the model, so those files
+never cost a review call and never clutter the findings.
+
+Each glob is matched (fnmatch semantics) against **both** the full
+repository-relative path and the bare basename, so `package-lock.json` excludes
+the file at any depth while `*/dist/*` targets a directory. The shipped defaults
+cover the usual suspects:
+
+```yaml
+# shiva.config.yml
+exclude:
+  - "*.lock"          # poetry.lock, Cargo.lock, yarn.lock, Gemfile.lock, ...
+  - "package-lock.json"
+  - "*.min.js"
+  - "*.map"
+  - "*/node_modules/*"
+  - "*/dist/*"
+  # ... see the file for the full list
+```
+
+A target repo's `.shiva.yml` `exclude` list **replaces** these defaults wholesale
+(the same override-wins rule as `conventions`), so copy the ones you still want
+and add your own. The list is validated with the rest of the config
+(task `00015`): a non-list `exclude`, or an empty/blank pattern, fails the build
+with a clear message.
+
 ## Run n8n locally
 
 ```bash
@@ -122,7 +154,7 @@ Both images must be on the same version.
 
 The n8n workflow is generated, not hand-built. Sources of truth:
 
-- [`shiva.config.yml`](shiva.config.yml) — review categories (enabled ones end up in the prompt)
+- [`shiva.config.yml`](shiva.config.yml) — review categories (enabled ones end up in the prompt), per-repo `conventions`, and the [`exclude`](#excluded-files) globs for generated files
 - [`src/shiva_agent/review.py`](src/shiva_agent/review.py) — diff filtering and prompt assembly (unit-tested, embedded verbatim into the Code node)
 - [`scripts/build_workflow.py`](scripts/build_workflow.py) — assembles [`workflows/pr_review.json`](workflows/pr_review.json)
 
@@ -226,6 +258,7 @@ Ordered by priority (highest first). Check off as you go.
 - [x] `00014` — Per-repo overrides: a target repo ships its own `.shiva.yml`, merged over the defaults in [`shiva.config.yml`](shiva.config.yml) by category `id` — see [Per-repo configuration](#per-repo-configuration) (build-time merge via `--override`; runtime auto-fetch is a follow-up)
 - [x] `00015` — Validate the review config: a malformed `.shiva.yml` (missing `name`/`prompt`, duplicate `id`, non-boolean `enabled`, wrong shape) fails the build with a clear, actionable message via [`validate_config`](src/shiva_agent/review.py) instead of an opaque `KeyError` — see [Per-repo configuration](#per-repo-configuration)
 - [x] `00016` — Require at least one enabled category: an override that disables every category fails the build (`no review categories are enabled ...`) instead of silently producing a reviewer whose prompt has an empty "Review categories" section — see [Per-repo configuration](#per-repo-configuration)
+- [x] `00017` — Skip generated files: lock files, source maps, minified bundles, and vendored/generated code are dropped before review via a configurable `exclude` glob list in [`shiva.config.yml`](shiva.config.yml), so a paid LLM call is never spent reviewing machine-generated noise — see [Excluded files](#excluded-files)
 
 ## Definition of Done (MVP)
 

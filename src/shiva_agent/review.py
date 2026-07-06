@@ -115,6 +115,7 @@ def validate_config(config, partial=False, require_enabled=False):
     bare `KeyError` deep inside `load_enabled_categories` (task 00015).
 
     Checks: `config` is a mapping; `conventions` (if present) is a string;
+    `exclude` (if present) is a list of non-empty string glob patterns;
     `categories` is a list of mappings; each category has a non-empty string
     `id` (unique across the list), a non-empty string `name` and `prompt`, and
     an `enabled` that is a bool when present. Returns None on success.
@@ -141,6 +142,14 @@ def validate_config(config, partial=False, require_enabled=False):
         raise ConfigError(
             f"conventions must be a string, got {type(conventions).__name__}"
         )
+
+    exclude = config.get("exclude")
+    if exclude is not None:
+        if not isinstance(exclude, list):
+            raise ConfigError(f"exclude must be a list, got {type(exclude).__name__}")
+        for i, pattern in enumerate(exclude):
+            if not isinstance(pattern, str) or not pattern.strip():
+                raise ConfigError(f"exclude[{i}] must be a non-empty string glob pattern")
 
     categories = config.get("categories", [])
     if not isinstance(categories, list):
@@ -255,12 +264,40 @@ def resolve_conventions(config, override=None):
     return ""
 
 
-def filter_files(files, allowed_extensions=None, max_patch_chars=DEFAULT_MAX_PATCH_CHARS):
+def resolve_exclude(config, override=None):
+    """Return the file-exclusion glob patterns after applying an optional override.
+
+    Generated, vendored, and lock files (`poetry.lock`, `*.min.js`, `dist/*`,
+    …) carry a diff but are not worth a paid LLM review (task 00017), so
+    `filter_files` drops any file whose path matches one of these globs. The
+    defaults live in `shiva.config.yml`; a target repo's `.shiva.yml` `exclude`
+    list *replaces* them wholesale (the same override-wins rule as
+    `resolve_conventions`), so the repo keeps full control of what is reviewed.
+    Returns a fresh list (never an alias of a config list); `[]` when neither
+    provides a non-empty `exclude`.
+    """
+    for src in (override, config):
+        exclude = (src or {}).get("exclude")
+        if exclude:
+            return list(exclude)
+    return []
+
+
+def filter_files(
+    files, allowed_extensions=None, max_patch_chars=DEFAULT_MAX_PATCH_CHARS, exclude_globs=None
+):
     """Filter GitHub /pulls/{n}/files items down to reviewable ones.
 
-    Drops files without a patch (binary), removed files, oversized patches,
-    and — when allowed_extensions is given — files with other extensions.
+    Drops files without a patch (binary), removed files, files whose path
+    matches an `exclude_globs` pattern (generated/vendored/lock files, task
+    00017), oversized patches, and — when allowed_extensions is given — files
+    with other extensions. Each glob is matched against both the full
+    repository-relative path and the bare basename (fnmatch semantics), so
+    `package-lock.json` excludes the file at any depth while `*/dist/*` targets
+    a directory.
     """
+    from fnmatch import fnmatch
+
     kept = []
     for f in files:
         patch = f.get("patch")
@@ -268,10 +305,14 @@ def filter_files(files, allowed_extensions=None, max_patch_chars=DEFAULT_MAX_PAT
             continue
         if f.get("status") == "removed":
             continue
+        name = f.get("filename", "")
+        if exclude_globs:
+            base = name.rsplit("/", 1)[-1]
+            if any(fnmatch(name, g) or fnmatch(base, g) for g in exclude_globs):
+                continue
         if len(patch) > max_patch_chars:
             continue
         if allowed_extensions is not None:
-            name = f.get("filename", "")
             if not any(name.endswith(ext) for ext in allowed_extensions):
                 continue
         kept.append(f)
