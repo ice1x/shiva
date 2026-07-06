@@ -28,6 +28,54 @@ SEVERITY_LEVELS = [
 # review on every label change.
 REVIEWABLE_ACTIONS = frozenset({"opened", "reopened", "ready_for_review", "synchronize"})
 
+# Name of the tool the AI Agent variant exposes so the model can pull extra
+# repository files for context (task 00013). Referenced both in the agent's
+# system prompt (below) and as the generated n8n tool node's name, so the two
+# never drift.
+FETCH_FILE_TOOL_NAME = "fetch_repo_file"
+# Tool description shown to the model. It fetches the full current contents of a
+# file from the pull request's head commit, so the reviewer can see code the
+# diff only hints at (the rest of a partially-shown file, a caller, a callee, a
+# base class, a referenced module) instead of guessing.
+FETCH_FILE_TOOL_DESCRIPTION = (
+    "Fetch the full current contents of a file from the pull request's "
+    "repository at the head commit. Input: a repository-relative file path "
+    "(for example src/app/main.py). Returns the file's text, or an error if "
+    "the path does not exist. Use it to read context the diff does not show: "
+    "the rest of a file when only a hunk is included, a caller or callee, a "
+    "base class, a configuration file, or a referenced module."
+)
+
+
+def build_agent_system_prompt():
+    """Return the system prompt for the AI Agent review variant (task 00013).
+
+    The default workflow sends the diff to the model in a single stateless HTTP
+    call. The agent variant instead runs the model in a tool-use loop with a
+    `fetch_repo_file` tool, so it can request additional files from the target
+    repository when the diff alone is not enough to judge a change. This system
+    prompt tells the model when to reach for that tool and — crucially — to base
+    every finding on code it has actually read rather than on speculation about
+    code it has not seen. The concrete review categories, severity scale, and
+    output format still arrive in the user message from `build_review_prompt`,
+    so the two variants produce reviews in the same shape.
+    """
+    return (
+        "You are a senior code reviewer. You are reviewing a pull request and "
+        "have a tool for extra context.\n"
+        f"When the diff alone is not enough to judge a change, call the "
+        f"`{FETCH_FILE_TOOL_NAME}` tool to fetch the full current contents of a "
+        "file from the pull request's repository (pass a repository-relative "
+        "path). Use it to read the rest of a file when only a hunk is shown, or "
+        "to inspect a caller, a callee, a base class, or a referenced module.\n"
+        "Fetch only files that materially help the review, and do not fetch "
+        "more than a handful. Base every finding on evidence you have actually "
+        "read — the diff or a file you fetched — never on a guess about code you "
+        "have not seen.\n"
+        "Then produce the review exactly as instructed in the user message: the "
+        "same categories, severity scale, and output format."
+    )
+
 
 def should_skip_pr(payload, skip_label=SKIP_REVIEW_LABEL):
     """Return True when the webhook event must not be reviewed.

@@ -28,8 +28,9 @@ jobs:
       - name: Run tests
         run: pytest -v
 
-      - name: Check generated workflow is up to date
+      - name: Check generated workflows are up to date
         run: |
           python scripts/build_workflow.py
-          git diff --exit-code workflows/pr_review.json \
-            || { echo "::error::workflows/pr_review.json is stale — regenerate with 'python scripts/build_workflow.py' and commit the result"; exit 1; }
+          python scripts/build_workflow.py --agent
+          git diff --exit-code workflows/pr_review.json workflows/pr_review.agent.json \
+            || { echo "::error::a generated workflow is stale — regenerate with 'python scripts/build_workflow.py [--agent]' and commit the result"; exit 1; }

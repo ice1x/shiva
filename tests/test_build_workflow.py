@@ -14,6 +14,11 @@ def workflow():
     return build_workflow(CONFIG_PATH)
 
 
+@pytest.fixture(scope="module")
+def agent_workflow():
+    return build_workflow(CONFIG_PATH, agent=True)
+
+
 def node_by_type(workflow, node_type):
     return [n for n in workflow["nodes"] if n["type"] == node_type]
 
@@ -207,3 +212,92 @@ def test_llm_node_uses_current_anthropic_api(workflow):
         for h in llm["parameters"]["headerParameters"]["parameters"]
     }
     assert headers["anthropic-version"] == "2023-06-01"
+
+
+# --- AI Agent variant (task 00013) -----------------------------------------
+
+
+def test_agent_variant_does_not_change_the_default_workflow():
+    """--agent is opt-in: the default workflow must stay byte-identical so its
+    committed artifact and CI staleness check are unaffected."""
+    assert build_workflow(CONFIG_PATH, agent=False) == build_workflow(CONFIG_PATH)
+    assert build_workflow(CONFIG_PATH, agent=True) != build_workflow(CONFIG_PATH)
+
+
+def test_agent_workflow_replaces_the_llm_call_with_an_agent(agent_workflow):
+    types = [n["type"] for n in agent_workflow["nodes"]]
+    assert "@n8n/n8n-nodes-langchain.agent" in types
+    assert "@n8n/n8n-nodes-langchain.lmChatAnthropic" in types
+    assert "@n8n/n8n-nodes-langchain.toolHttpRequest" in types
+    # the single-call Claude Review HTTP node is gone in this variant
+    assert not any(
+        n["type"] == "n8n-nodes-base.httpRequest" and "anthropic" in n["parameters"]["url"]
+        for n in agent_workflow["nodes"]
+    )
+
+
+def test_agent_workflow_reuses_the_skip_and_filter_pipeline(agent_workflow):
+    """The upstream gate + fetch + build-prompt Code nodes are identical to the
+    default variant; only the review/comment stage changes."""
+    types = [n["type"] for n in agent_workflow["nodes"]]
+    assert "n8n-nodes-base.webhook" in types
+    assert "n8n-nodes-base.if" in types
+    assert types.count("n8n-nodes-base.code") == 2  # check skip + build prompt
+    connections = agent_workflow["connections"]
+    assert connections["Filter Diff & Build Prompt"]["main"][0][0]["node"] == "AI Review Agent"
+    assert connections["AI Review Agent"]["main"][0][0]["node"] == "Post PR Comment"
+
+
+def test_agent_model_and_tool_attach_via_langchain_connection_types(agent_workflow):
+    connections = agent_workflow["connections"]
+    model = connections["Anthropic Chat Model"]["ai_languageModel"][0][0]
+    assert model["node"] == "AI Review Agent"
+    assert model["type"] == "ai_languageModel"
+    tool = connections["Fetch Repo File"]["ai_tool"][0][0]
+    assert tool["node"] == "AI Review Agent"
+    assert tool["type"] == "ai_tool"
+
+
+def test_agent_carries_the_file_fetch_system_prompt(agent_workflow):
+    from shiva_agent.review import FETCH_FILE_TOOL_NAME
+
+    agent = next(n for n in agent_workflow["nodes"] if n["name"] == "AI Review Agent")
+    system = agent["parameters"]["options"]["systemMessage"]
+    assert FETCH_FILE_TOOL_NAME in system
+    # the same fully-specified review prompt is still the user message
+    assert agent["parameters"]["text"] == "={{ $json.prompt }}"
+
+
+def test_fetch_tool_reads_the_head_sha_from_the_webhook(agent_workflow):
+    """The tool must fetch files at the PR's head commit (the code under review),
+    with owner/repo/sha resolved from the original webhook event."""
+    tool = next(n for n in agent_workflow["nodes"] if n["name"] == "Fetch Repo File")
+    url = tool["parameters"]["url"]
+    assert "/contents/{path}" in url  # AI-supplied path placeholder
+    assert "head.sha" in url  # pinned to the reviewed commit, not a branch tip
+    assert "repository.full_name" in url
+    placeholders = [p["name"] for p in tool["parameters"]["placeholderDefinitions"]["values"]]
+    assert "path" in placeholders
+
+
+def test_agent_post_comment_reads_agent_output(agent_workflow):
+    """The agent emits plain text on $json.output — the comment body must read
+    that, not the raw Anthropic messages `content` array of the default variant."""
+    post = next(n for n in agent_workflow["nodes"] if n["name"] == "Post PR Comment")
+    body = post["parameters"]["jsonBody"]
+    assert "$json.output" in body
+    assert "$json.content" not in body
+
+
+def test_agent_workflow_is_json_serializable(agent_workflow):
+    json.dumps(agent_workflow)
+
+
+def test_agent_workflow_connection_targets_exist(agent_workflow):
+    names = {n["name"] for n in agent_workflow["nodes"]}
+    for source, targets in agent_workflow["connections"].items():
+        assert source in names
+        for conn_type in targets.values():
+            for branch in conn_type:
+                for target in branch:
+                    assert target["node"] in names
