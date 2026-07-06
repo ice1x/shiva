@@ -61,18 +61,22 @@ return [{"json": {"skip": should_skip_pr(body), "body": body}}]"""
     )
 
 
-def build_code_node_script(enabled_categories):
+def build_code_node_script(enabled_categories, conventions=""):
     """Compose the Python source for the n8n Code node (Python runtime)."""
     functions = inspect.getsource(review.filter_files) + "\n" + inspect.getsource(
         review.build_review_prompt
     )
     constants = f"""CATEGORIES = {json.dumps(enabled_categories, indent=2)}
 
+# Severity scale + per-repo conventions baked into the prompt (task 00012).
+SEVERITY_LEVELS = {json.dumps(review.SEVERITY_LEVELS, indent=2)}
+CONVENTIONS = {json.dumps(conventions)}
+
 ALLOWED_EXTENSIONS = None  # e.g. [".py"] to review Python files only
 DEFAULT_MAX_PATCH_CHARS = 15_000"""
     body = """files = [item.get("json") or {} for item in _items]
 kept = filter_files(files, allowed_extensions=ALLOWED_EXTENSIONS)
-prompt = build_review_prompt(CATEGORIES, kept)
+prompt = build_review_prompt(CATEGORIES, kept, conventions=CONVENTIONS)
 return [{"json": {"prompt": prompt, "reviewed_files": len(kept), "total_files": len(files)}}]"""
     return render_code_node(
         "Edit src/shiva_agent/review.py and shiva.config.yml, then regenerate.",
@@ -92,6 +96,7 @@ def build_workflow(config_path, override_path=None):
     config = yaml.safe_load(Path(config_path).read_text())
     override = yaml.safe_load(Path(override_path).read_text()) if override_path else None
     enabled = review.resolve_categories(config, override)
+    conventions = review.resolve_conventions(config, override)
 
     webhook = {
         "id": "webhook",
@@ -185,7 +190,7 @@ def build_workflow(config_path, override_path=None):
         "position": None,
         "parameters": {
             "language": "python",
-            "pythonCode": build_code_node_script(enabled),
+            "pythonCode": build_code_node_script(enabled, conventions),
         },
     }
 

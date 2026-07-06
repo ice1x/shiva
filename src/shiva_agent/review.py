@@ -7,6 +7,15 @@ dependency-free (standard library only) and self-contained.
 
 DEFAULT_MAX_PATCH_CHARS = 15_000
 SKIP_REVIEW_LABEL = "skip-review"
+# Severity scale the model must apply to every finding (task 00012). Defining
+# each level in the prompt keeps ratings consistent across reviews instead of
+# leaving high/medium/low to the model's discretion. Ordered most→least severe.
+SEVERITY_LEVELS = [
+    ("blocker", "must fix before merge — breaks correctness, security, or data integrity"),
+    ("high", "should fix before merge — a likely bug or a significant risk"),
+    ("medium", "worth fixing — maintainability, a missed edge case, or a minor correctness concern"),
+    ("low", "optional polish — style, naming, or clarity"),
+]
 # pull_request actions that carry a diff worth reviewing. Everything else
 # (closed/labeled/edited/..., and non-PR deliveries like the initial 'ping')
 # is skipped so we neither 404 on a missing PR number nor pay for a duplicate
@@ -84,6 +93,22 @@ def resolve_categories(config, override=None):
     return load_enabled_categories(merge_config(config, override))
 
 
+def resolve_conventions(config, override=None):
+    """Return the repo conventions text after applying an optional override.
+
+    Repo conventions are free-form house rules injected into the review prompt
+    (task 00012) so the LLM respects the target project's standards. The
+    `override` (a target repo's `.shiva.yml`) wins over the base `config` when
+    it provides a non-empty `conventions`; otherwise the base value is used.
+    Returns "" (with surrounding whitespace stripped) when neither provides any.
+    """
+    for src in (override, config):
+        conventions = (src or {}).get("conventions")
+        if conventions and conventions.strip():
+            return conventions.strip()
+    return ""
+
+
 def filter_files(files, allowed_extensions=None, max_patch_chars=DEFAULT_MAX_PATCH_CHARS):
     """Filter GitHub /pulls/{n}/files items down to reviewable ones.
 
@@ -107,24 +132,53 @@ def filter_files(files, allowed_extensions=None, max_patch_chars=DEFAULT_MAX_PAT
     return kept
 
 
-def build_review_prompt(categories, files):
-    """Assemble the LLM review prompt from enabled categories and file diffs."""
+def build_review_prompt(categories, files, conventions=""):
+    """Assemble the LLM review prompt from enabled categories and file diffs.
+
+    The prompt is fully specified (task 00012): it lists the review
+    categories, optional per-repo `conventions`, a defined severity scale, and
+    a fixed output format, so reviews are consistent and machine-skimmable.
+    """
     lines = [
-        "You are a code review agent. Review the pull request diff below.",
-        "Evaluate the changes ONLY against the following review categories:",
+        "You are a senior code reviewer. Review the pull request diff below.",
+        'Evaluate the changes ONLY against the categories under "Review categories".',
         "",
+        "# Review categories",
     ]
     for c in categories:
         lines.append("## " + c["name"])
         lines.append(c["prompt"])
         lines.append("")
+
+    if conventions and conventions.strip():
+        lines.append("# Repository conventions")
+        lines.append("Honour the target repository's house rules while reviewing:")
+        lines.append("")
+        lines.append(conventions.strip())
+        lines.append("")
+
+    lines.append("# Severity levels")
+    lines.append("Rate every finding with exactly one severity:")
+    for level, definition in SEVERITY_LEVELS:
+        lines.append("- **" + level + "** — " + definition + ".")
+    lines.append("")
+
+    lines.append("# Output format")
+    lines.append("Respond in GitHub-flavored markdown with this exact structure:")
+    lines.append("1. **Summary** — one sentence describing what the PR changes.")
     lines.append(
-        "For each finding, state the category, the file, the relevant lines, "
-        "a severity (high/medium/low), and a short actionable explanation. "
-        "If a category has no findings, say so in one line. "
-        "Format the whole answer as GitHub-flavored markdown."
+        "2. **Verdict** — exactly one of `approve`, `comment`, or `request changes`."
+    )
+    lines.append(
+        "3. **Findings** — a bullet per issue, ordered by severity (blocker first), "
+        "each in the shape: `[severity] category — path:lines — issue, then the concrete fix`."
+    )
+    lines.append(
+        "Report only issues that fall under the categories above. "
+        "If there are no findings, write `No issues found.` under Findings."
     )
     lines.append("")
+
     lines.append("# Diff")
     if not files:
         lines.append("No reviewable files in this pull request.")
