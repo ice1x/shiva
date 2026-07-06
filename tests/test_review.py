@@ -10,6 +10,7 @@ from shiva_agent.review import (
     resolve_categories,
     resolve_conventions,
     should_skip_pr,
+    split_files_into_batches,
 )
 
 fake = Faker()
@@ -73,6 +74,46 @@ class TestFilterFiles:
         removed = make_file("old.py", status="removed")
         kept = filter_files([removed, make_file("new.py")])
         assert [f["filename"] for f in kept] == ["new.py"]
+
+
+class TestSplitFilesIntoBatches:
+    def test_single_batch_when_within_budget(self):
+        files = [make_file(patch="x" * 100), make_file(patch="y" * 100)]
+        batches = split_files_into_batches(files, max_batch_chars=1_000)
+        assert len(batches) == 1
+        assert batches[0] == files
+
+    def test_packs_greedily_into_multiple_batches(self):
+        a, b, c = (make_file(patch="a" * 60), make_file(patch="b" * 60), make_file(patch="c" * 60))
+        batches = split_files_into_batches([a, b, c], max_batch_chars=100)
+        # 60 + 60 > 100 → a alone; 60 + 60 > 100 → b alone; c alone
+        assert batches == [[a], [b], [c]]
+
+    def test_two_small_files_share_a_batch_then_split(self):
+        a, b, c = (make_file(patch="a" * 40), make_file(patch="b" * 40), make_file(patch="c" * 40))
+        batches = split_files_into_batches([a, b, c], max_batch_chars=100)
+        # 40 + 40 = 80 ≤ 100 → {a, b}; adding c → 120 > 100 → {c}
+        assert batches == [[a, b], [c]]
+
+    def test_preserves_file_order(self):
+        files = [make_file(f"f{i}.py", patch="p" * 50) for i in range(5)]
+        flattened = [f for batch in split_files_into_batches(files, max_batch_chars=120) for f in batch]
+        assert flattened == files
+
+    def test_oversized_single_file_gets_its_own_batch(self):
+        big = make_file("big.py", patch="z" * 500)
+        small = make_file("small.py", patch="s" * 10)
+        batches = split_files_into_batches([big, small], max_batch_chars=100)
+        # a lone file over budget is never dropped; it just gets its own batch
+        assert batches == [[big], [small]]
+
+    def test_empty_input_yields_one_empty_batch(self):
+        # one empty batch → the caller still emits a single "no files" review
+        assert split_files_into_batches([]) == [[]]
+
+    def test_tolerates_missing_patch(self):
+        f = {"filename": "a.py", "status": "modified"}  # no patch key
+        assert split_files_into_batches([f], max_batch_chars=100) == [[f]]
 
 
 def make_pr_payload(draft=False, labels=(), action="opened"):
@@ -287,6 +328,25 @@ class TestBuildReviewPrompt:
             load_enabled_categories(CONFIG), [make_file("a.py")], conventions="   "
         )
         assert "Repository conventions" not in prompt
+
+    def test_marks_the_part_for_a_multi_batch_review(self):
+        # 00011: a large PR is reviewed in several passes; each prompt tells the
+        # model which part it is so it does not flag the other files as missing.
+        prompt = build_review_prompt(
+            load_enabled_categories(CONFIG), [make_file("a.py")], part=(2, 3)
+        )
+        assert "part 2 of 3" in prompt
+
+    def test_no_part_marker_for_a_single_batch(self):
+        prompt = build_review_prompt(
+            load_enabled_categories(CONFIG), [make_file("a.py")], part=(1, 1)
+        )
+        assert "part 1 of 1" not in prompt
+        assert "review part" not in prompt.lower()
+
+    def test_no_part_marker_when_part_omitted(self):
+        prompt = build_review_prompt(load_enabled_categories(CONFIG), [make_file("a.py")])
+        assert "review part" not in prompt.lower()
 
 
 class TestResolveConventions:

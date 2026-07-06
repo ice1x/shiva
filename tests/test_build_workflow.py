@@ -177,6 +177,21 @@ def test_build_with_repo_override_embeds_conventions(tmp_path):
     assert "Prefer pure functions and never log secrets." in script
 
 
+def test_code_node_splits_large_prs_into_batches(workflow):
+    """00011: the embedded logic packs the diff into size-bounded batches and
+    emits one output item per batch, so n8n reviews a large PR in several
+    passes (one Claude call + one comment per batch)."""
+    code = next(n for n in workflow["nodes"] if n["name"] == "Filter Diff & Build Prompt")
+    script = code["parameters"]["pythonCode"]
+    assert "def split_files_into_batches(" in script
+    assert "DEFAULT_MAX_BATCH_CHARS" in script
+    # the node body fans out: one item per batch, each carrying batch metadata
+    assert "split_files_into_batches(" in script
+    assert "batch_count" in script
+    # lineage pinned to the single webhook item so downstream $('...').item resolves
+    assert "pairedItem" in script
+
+
 def test_llm_node_uses_current_anthropic_api(workflow):
     llm = [
         n
