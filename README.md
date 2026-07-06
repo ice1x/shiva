@@ -58,6 +58,21 @@ A target repo tailors the review by shipping a `.shiva.yml` that is merged over
 - an entry with a new `id` is added as a first-class custom category;
 - defaults left unmentioned are untouched, and their order is preserved.
 
+A top-level `conventions:` block (free-form house rules — coding standards,
+context, no-go rules) is likewise overridden by the target repo's value and
+injected into the review prompt (task `00012`), so the review respects the
+project's own conventions:
+
+```yaml
+# target-repo/.shiva.yml
+conventions: |
+  Prefer pure functions; keep side effects at the edges.
+  Never log secrets or PII. Public APIs need docstrings.
+categories:
+  - id: performance
+    enabled: false
+```
+
 The merge is implemented and unit-tested in
 [`merge_config`](src/shiva_agent/review.py). Because review categories are
 resolved and embedded into the Code node at build time, a per-repo workflow is
@@ -135,7 +150,7 @@ Ordered by priority (highest first). Check off as you go.
 - [ ] `00009` — Start using it: enable the workflow on 1–2 active pet project repos
 - [x] `00010` — Add an IF node to skip draft PRs and PRs labeled `skip-review`
 - [ ] `00011` — Handle large PRs: split diffs per file and review in a Loop node
-- [ ] `00012` — Tune the review prompt based on real feedback quality (add repo conventions, severity levels, output format)
+- [x] `00012` — Tune the review prompt: a defined severity scale (blocker/high/medium/low), a fixed output format (Summary / Verdict / ordered Findings), and per-repo `conventions` injected from `.shiva.yml` — see [Per-repo configuration](#per-repo-configuration)
 - [ ] `00013` — Experiment with the AI Agent node + tools so the model can request extra repo files for context
 - [x] `00014` — Per-repo overrides: a target repo ships its own `.shiva.yml`, merged over the defaults in [`shiva.config.yml`](shiva.config.yml) by category `id` — see [Per-repo configuration](#per-repo-configuration) (build-time merge via `--override`; runtime auto-fetch is a follow-up)
 

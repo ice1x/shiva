@@ -147,6 +147,36 @@ def test_build_without_override_matches_default():
     assert build_workflow(CONFIG_PATH) == build_workflow(CONFIG_PATH, override_path=None)
 
 
+def test_code_node_embeds_tuned_prompt_scaffolding(workflow):
+    """00012: severity scale and structured output format travel with the
+    embedded build_review_prompt so the runtime prompt is fully specified."""
+    code = next(n for n in workflow["nodes"] if n["name"] == "Filter Diff & Build Prompt")
+    script = code["parameters"]["pythonCode"]
+    assert "Severity levels" in script
+    assert "Output format" in script
+    assert "Verdict" in script
+    # conventions are wired through, defaulting to the repo's configured value
+    assert "CONVENTIONS" in script
+    assert "conventions=CONVENTIONS" in script
+
+
+def test_build_with_repo_override_embeds_conventions(tmp_path):
+    """00012 + 00014: a per-repo override's `conventions` block is baked into
+    the embedded prompt so the generated workflow honours the target's rules."""
+    override = tmp_path / ".shiva.yml"
+    override.write_text(
+        "conventions: |\n"
+        "  Prefer pure functions and never log secrets.\n"
+        "categories:\n"
+        "  - id: performance\n"
+        "    enabled: false\n"
+    )
+    workflow = build_workflow(CONFIG_PATH, override_path=override)
+    code = next(n for n in workflow["nodes"] if n["name"] == "Filter Diff & Build Prompt")
+    script = code["parameters"]["pythonCode"]
+    assert "Prefer pure functions and never log secrets." in script
+
+
 def test_llm_node_uses_current_anthropic_api(workflow):
     llm = [
         n

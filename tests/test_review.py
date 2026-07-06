@@ -2,11 +2,13 @@ import pytest
 from faker import Faker
 
 from shiva_agent.review import (
+    SEVERITY_LEVELS,
     build_review_prompt,
     filter_files,
     load_enabled_categories,
     merge_config,
     resolve_categories,
+    resolve_conventions,
     should_skip_pr,
 )
 
@@ -248,3 +250,61 @@ class TestBuildReviewPrompt:
     def test_empty_files_produces_no_diff_marker(self):
         prompt = build_review_prompt(load_enabled_categories(CONFIG), [])
         assert "No reviewable files" in prompt
+
+    def test_defines_every_severity_level(self):
+        # 00012: the prompt spells out each severity so the model applies a
+        # consistent scale instead of an ad-hoc high/medium/low.
+        prompt = build_review_prompt(load_enabled_categories(CONFIG), [make_file("a.py")])
+        assert "Severity levels" in prompt
+        for level, definition in SEVERITY_LEVELS:
+            assert level in prompt
+            assert definition in prompt
+
+    def test_specifies_a_structured_output_format(self):
+        # 00012: a fixed output shape — summary, verdict, ordered findings.
+        prompt = build_review_prompt(load_enabled_categories(CONFIG), [make_file("a.py")])
+        assert "Output format" in prompt
+        assert "Summary" in prompt
+        assert "Verdict" in prompt
+        assert "Findings" in prompt
+
+    def test_includes_repo_conventions_when_provided(self):
+        # 00012: per-repo conventions are injected so the review respects the
+        # target project's house rules.
+        conventions = "Prefer pure functions. Never log secrets."
+        prompt = build_review_prompt(
+            load_enabled_categories(CONFIG), [make_file("a.py")], conventions=conventions
+        )
+        assert "Repository conventions" in prompt
+        assert conventions in prompt
+
+    def test_omits_conventions_section_when_absent(self):
+        prompt = build_review_prompt(load_enabled_categories(CONFIG), [make_file("a.py")])
+        assert "Repository conventions" not in prompt
+
+    def test_blank_conventions_are_not_rendered(self):
+        prompt = build_review_prompt(
+            load_enabled_categories(CONFIG), [make_file("a.py")], conventions="   "
+        )
+        assert "Repository conventions" not in prompt
+
+
+class TestResolveConventions:
+    def test_returns_empty_when_neither_provides(self):
+        assert resolve_conventions({"version": 1}) == ""
+
+    def test_returns_base_conventions_when_no_override(self):
+        assert resolve_conventions({"conventions": "House rules."}) == "House rules."
+
+    def test_override_replaces_base(self):
+        merged = resolve_conventions(
+            {"conventions": "Base rules."}, {"conventions": "Repo rules."}
+        )
+        assert merged == "Repo rules."
+
+    def test_falls_back_to_base_when_override_omits(self):
+        merged = resolve_conventions({"conventions": "Base rules."}, {"categories": []})
+        assert merged == "Base rules."
+
+    def test_strips_surrounding_whitespace(self):
+        assert resolve_conventions({"conventions": "\n  Trim me.\n"}) == "Trim me."

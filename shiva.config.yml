@@ -17,6 +17,14 @@
 
 version: 1
 
+# Free-form house rules injected into the review prompt (task 00012). Leave
+# empty in the defaults; a target repo sets its own in `.shiva.yml` and it is
+# merged over this value (override wins). Example:
+#   conventions: |
+#     Prefer pure functions; keep side effects at the edges.
+#     Never log secrets or PII. Public APIs need docstrings.
+conventions: ""
+
 categories:
   - id: structural
     name: Structural Review
