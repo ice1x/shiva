@@ -51,7 +51,7 @@ version: 1
 # reach a model server on the host (see docker-compose.yml). A natively-run n8n
 # should override `endpoint` to use localhost.
 llm:
-  provider: ollama            # free, local, no API key; set `model:` to taste
+  provider: ollama            # DEFAULT for every repo not listed below
   temperature: 0              # 0 = deterministic, terse, on-topic (0–2)
 
 # Per-repo model mapping: the default `llm` above applies to every repo except
@@ -61,13 +61,19 @@ llm:
 # API key as an n8n credential (the E2E driver reads it by provider, e.g.
 # $SHIVA_OPENAI_API_KEY, else $SHIVA_LLM_API_KEY), and `e2e.py check` fails until
 # it is set — so the mapping ships EMPTY to keep a fresh clone free and keyless.
-# Uncomment and add your key to route a repo to a hosted model:
-#
-# llm_by_repo:
-#   ice1x/graphbook:
-#     provider: openai
-#     model: gpt-4o
-llm_by_repo: {}
+# Each key is a GitHub "owner/repo"; its block has the same fields as `llm`
+# above (provider / model / temperature / endpoint / auth). Add a repo here to
+# route it to a different model than the default; leave it out to use the
+# default. Build that repo's workflow with `build_workflow.py --repo owner/name`.
+llm_by_repo:
+  ice1x/graphbook:            # this repo reviews with a hosted model...
+    provider: openai
+    model: gpt-4o
+    temperature: 0
+  # ice1x/antigram:           # ...another could use a different vendor:
+  #   provider: deepseek
+  #   model: deepseek-chat
+  # everyone else falls back to the default `llm` (ollama) above.
 
 # Free-form house rules injected into the review prompt (task 00012). Leave
 # empty in the defaults; a target repo sets its own in `.shiva.yml` and it is
