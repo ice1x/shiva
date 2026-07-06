@@ -74,9 +74,15 @@ categories:
 ```
 
 The merge is implemented and unit-tested in
-[`merge_config`](src/shiva_agent/review.py). Because review categories are
-resolved and embedded into the Code node at build time, a per-repo workflow is
-produced by pointing the generator at the override file:
+[`merge_config`](src/shiva_agent/review.py). A hand-written `.shiva.yml` is
+validated before it is used (task `00015`): the merged, effective config is
+checked by [`validate_config`](src/shiva_agent/review.py), so a typo — a
+category with no `prompt`, a duplicated `id`, `enabled: "yes"` as a string, or
+`categories:` written as a mapping — fails the build with a clear message naming
+the offending category (`error: invalid config in .shiva.yml: category 'x' is
+missing a non-empty string 'prompt'`) instead of a bare `KeyError`. Because
+review categories are resolved and embedded into the Code node at build time, a
+per-repo workflow is produced by pointing the generator at the override file:
 
 ```bash
 .venv/bin/python scripts/build_workflow.py \
@@ -213,6 +219,7 @@ Ordered by priority (highest first). Check off as you go.
 - [x] `00012` — Tune the review prompt: a defined severity scale (blocker/high/medium/low), a fixed output format (Summary / Verdict / ordered Findings), and per-repo `conventions` injected from `.shiva.yml` — see [Per-repo configuration](#per-repo-configuration)
 - [x] `00013` — Experiment with the AI Agent node + tools: an opt-in agentic variant replaces the single Claude HTTP call with an AI Agent node wired to a `fetch_repo_file` tool, so the model can pull extra repository files for context — see [AI Agent variant](#ai-agent-variant-extra-file-context)
 - [x] `00014` — Per-repo overrides: a target repo ships its own `.shiva.yml`, merged over the defaults in [`shiva.config.yml`](shiva.config.yml) by category `id` — see [Per-repo configuration](#per-repo-configuration) (build-time merge via `--override`; runtime auto-fetch is a follow-up)
+- [x] `00015` — Validate the review config: a malformed `.shiva.yml` (missing `name`/`prompt`, duplicate `id`, non-boolean `enabled`, wrong shape) fails the build with a clear, actionable message via [`validate_config`](src/shiva_agent/review.py) instead of an opaque `KeyError` — see [Per-repo configuration](#per-repo-configuration)
 
 ## Definition of Done (MVP)
 

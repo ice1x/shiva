@@ -5,6 +5,7 @@ from shiva_agent.review import (
     FETCH_FILE_TOOL_DESCRIPTION,
     FETCH_FILE_TOOL_NAME,
     SEVERITY_LEVELS,
+    ConfigError,
     build_agent_system_prompt,
     build_review_prompt,
     filter_files,
@@ -14,6 +15,7 @@ from shiva_agent.review import (
     resolve_conventions,
     should_skip_pr,
     split_files_into_batches,
+    validate_config,
 )
 
 fake = Faker()
@@ -269,6 +271,108 @@ class TestResolveCategories:
         override = {"categories": [{"id": "i18n", "name": "i18n Review", "enabled": True, "prompt": "Check strings."}]}
         names = [c["name"] for c in resolve_categories(DEFAULTS, override)]
         assert names == ["Structural Review", "Logical Review", "i18n Review"]
+
+    def test_rejects_override_custom_category_missing_prompt(self):
+        # A hand-written .shiva.yml adds a new category but forgets its prompt.
+        override = {"categories": [{"id": "i18n", "name": "i18n Review", "enabled": True}]}
+        with pytest.raises(ConfigError) as exc:
+            resolve_categories(DEFAULTS, override)
+        assert "i18n" in str(exc.value)
+        assert "prompt" in str(exc.value)
+
+    def test_rejects_override_non_bool_enabled(self):
+        override = {"categories": [{"id": "logical", "enabled": "yes"}]}
+        with pytest.raises(ConfigError) as exc:
+            resolve_categories(DEFAULTS, override)
+        assert "logical" in str(exc.value)
+        assert "enabled" in str(exc.value)
+
+    def test_valid_override_passes_through(self):
+        override = {"categories": [{"id": "logical", "enabled": False}]}
+        assert [c["name"] for c in resolve_categories(DEFAULTS, override)] == ["Structural Review"]
+
+    def test_rejects_structurally_broken_override_before_merge(self):
+        # `categories:` written as a mapping (a YAML indentation mistake) would
+        # otherwise crash inside merge_config with an opaque AttributeError.
+        override = {"categories": {"id": "logical"}}
+        with pytest.raises(ConfigError) as exc:
+            resolve_categories(DEFAULTS, override)
+        assert "categories" in str(exc.value)
+
+    def test_partial_override_may_omit_name_and_prompt(self):
+        # An override entry that only flips `enabled` is valid on its own.
+        override = {"categories": [{"id": "security", "enabled": True}]}
+        validate_config(override, partial=True)  # must not raise
+
+
+class TestValidateConfig:
+    def test_accepts_a_well_formed_config(self):
+        # Returns None and does not raise on a valid config.
+        assert validate_config(DEFAULTS) is None
+
+    def test_the_shipped_default_config_is_valid(self):
+        import yaml
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        config = yaml.safe_load((repo_root / "shiva.config.yml").read_text())
+        assert validate_config(config) is None
+
+    def test_config_must_be_a_mapping(self):
+        with pytest.raises(ConfigError):
+            validate_config(["not", "a", "mapping"])
+
+    def test_categories_must_be_a_list(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_config({"version": 1, "categories": {"id": "x"}})
+        assert "categories" in str(exc.value)
+        assert "list" in str(exc.value)
+
+    def test_category_must_be_a_mapping(self):
+        with pytest.raises(ConfigError):
+            validate_config({"categories": ["logical"]})
+
+    def test_category_requires_non_empty_id(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_config({"categories": [{"name": "X", "prompt": "p", "enabled": True}]})
+        assert "id" in str(exc.value)
+
+    def test_category_id_must_be_unique(self):
+        config = {
+            "categories": [
+                {"id": "dup", "name": "A", "prompt": "a", "enabled": True},
+                {"id": "dup", "name": "B", "prompt": "b", "enabled": True},
+            ]
+        }
+        with pytest.raises(ConfigError) as exc:
+            validate_config(config)
+        assert "dup" in str(exc.value)
+        assert "duplicate" in str(exc.value).lower()
+
+    def test_category_requires_non_empty_name(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_config({"categories": [{"id": "x", "name": "  ", "prompt": "p", "enabled": True}]})
+        assert "x" in str(exc.value)
+        assert "name" in str(exc.value)
+
+    def test_category_requires_non_empty_prompt(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_config({"categories": [{"id": "x", "name": "X", "prompt": "", "enabled": True}]})
+        assert "x" in str(exc.value)
+        assert "prompt" in str(exc.value)
+
+    def test_enabled_must_be_boolean_when_present(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_config({"categories": [{"id": "x", "name": "X", "prompt": "p", "enabled": 1}]})
+        assert "enabled" in str(exc.value)
+
+    def test_enabled_is_optional(self):
+        assert validate_config({"categories": [{"id": "x", "name": "X", "prompt": "p"}]}) is None
+
+    def test_conventions_must_be_a_string_when_present(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_config({"conventions": ["not", "a", "string"], "categories": []})
+        assert "conventions" in str(exc.value)
 
 
 class TestBuildReviewPrompt:

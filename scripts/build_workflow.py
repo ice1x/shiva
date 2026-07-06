@@ -485,9 +485,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     output = args.output or (AGENT_OUTPUT_PATH if args.agent else OUTPUT_PATH)
-    workflow = build_workflow(
-        REPO_ROOT / "shiva.config.yml", override_path=args.override, agent=args.agent
-    )
+    try:
+        workflow = build_workflow(
+            REPO_ROOT / "shiva.config.yml", override_path=args.override, agent=args.agent
+        )
+    except review.ConfigError as exc:
+        # A malformed config (usually a hand-written --override .shiva.yml) should
+        # fail the build with an actionable one-liner, not a traceback (task 00015).
+        source = args.override or "shiva.config.yml"
+        parser.exit(2, f"error: invalid config in {source}: {exc}\n")
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(workflow, indent=2) + "\n")
     print(f"wrote {output}")
