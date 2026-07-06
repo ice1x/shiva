@@ -102,6 +102,76 @@ def load_enabled_categories(config):
     ]
 
 
+class ConfigError(ValueError):
+    """Raised when a review config (`shiva.config.yml` / a repo's `.shiva.yml`) is malformed."""
+
+
+def validate_config(config, partial=False):
+    """Validate a review config, raising ConfigError with a clear message.
+
+    Per-repo overrides (task 00014) invite users to hand-write a `.shiva.yml`, so
+    a typo — an enabled category with no `prompt`, `enabled: "yes"` as a string, a
+    duplicated `id` — must fail the build with an actionable message instead of a
+    bare `KeyError` deep inside `load_enabled_categories` (task 00015).
+
+    Checks: `config` is a mapping; `conventions` (if present) is a string;
+    `categories` is a list of mappings; each category has a non-empty string
+    `id` (unique across the list), a non-empty string `name` and `prompt`, and
+    an `enabled` that is a bool when present. Returns None on success.
+
+    With `partial=True` the config is treated as a per-repo override: `name` and
+    `prompt` become optional (an override entry may set only `enabled`), though
+    when present they must still be non-empty strings. Everything else — the
+    structural shape, the `id`, uniqueness, the `enabled` type — is checked the
+    same way, so a malformed override is caught before it reaches `merge_config`.
+    The *effective* (merged) config is then validated in full, so a category
+    that ends up without a `name`/`prompt` is still rejected.
+    """
+    if not isinstance(config, dict):
+        raise ConfigError(f"config must be a mapping, got {type(config).__name__}")
+
+    conventions = config.get("conventions")
+    if conventions is not None and not isinstance(conventions, str):
+        raise ConfigError(
+            f"conventions must be a string, got {type(conventions).__name__}"
+        )
+
+    categories = config.get("categories", [])
+    if not isinstance(categories, list):
+        raise ConfigError(
+            f"categories must be a list, got {type(categories).__name__}"
+        )
+
+    seen_ids = set()
+    for i, cat in enumerate(categories):
+        where = f"category #{i + 1}"
+        if not isinstance(cat, dict):
+            raise ConfigError(f"{where} must be a mapping, got {type(cat).__name__}")
+
+        cat_id = cat.get("id")
+        if not isinstance(cat_id, str) or not cat_id.strip():
+            raise ConfigError(f"{where} is missing a non-empty string 'id'")
+        if cat_id in seen_ids:
+            raise ConfigError(f"category '{cat_id}' has a duplicate 'id'")
+        seen_ids.add(cat_id)
+
+        for field in ("name", "prompt"):
+            value = cat.get(field)
+            if value is None and partial:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(
+                    f"category '{cat_id}' is missing a non-empty string '{field}'"
+                )
+
+        enabled = cat.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ConfigError(
+                f"category '{cat_id}' has a non-boolean 'enabled' "
+                f"({type(enabled).__name__}); use true or false"
+            )
+
+
 def merge_config(base, override):
     """Merge a per-repo `override` config over the `base` defaults by category `id`.
 
@@ -141,10 +211,17 @@ def merge_config(base, override):
 def resolve_categories(config, override=None):
     """Return the enabled categories after applying an optional per-repo override.
 
-    Convenience wrapper: `load_enabled_categories(merge_config(config, override))`.
-    With no override it is equivalent to `load_enabled_categories(config)`.
+    Convenience wrapper: `load_enabled_categories(merge_config(config, override))`,
+    with the merged (effective) config validated first (task 00015) so a
+    malformed `.shiva.yml` fails with a clear ConfigError instead of a bare
+    KeyError. With no override it is equivalent to
+    `load_enabled_categories(config)` on a valid config.
     """
-    return load_enabled_categories(merge_config(config, override))
+    if override is not None:
+        validate_config(override, partial=True)
+    merged = merge_config(config, override)
+    validate_config(merged)
+    return load_enabled_categories(merged)
 
 
 def resolve_conventions(config, override=None):

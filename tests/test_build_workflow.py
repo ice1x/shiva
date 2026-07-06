@@ -152,6 +152,24 @@ def test_build_without_override_matches_default():
     assert build_workflow(CONFIG_PATH) == build_workflow(CONFIG_PATH, override_path=None)
 
 
+def test_build_rejects_a_malformed_override(tmp_path):
+    """00015: a hand-written override that adds a category without a prompt fails
+    the build with a clear ConfigError naming the category, not a bare KeyError."""
+    from shiva_agent.review import ConfigError
+
+    override = tmp_path / ".shiva.yml"
+    override.write_text(
+        "categories:\n"
+        "  - id: mytest\n"
+        "    name: My Test\n"
+        "    enabled: true\n"  # prompt omitted
+    )
+    with pytest.raises(ConfigError) as exc:
+        build_workflow(CONFIG_PATH, override_path=override)
+    assert "mytest" in str(exc.value)
+    assert "prompt" in str(exc.value)
+
+
 def test_code_node_embeds_tuned_prompt_scaffolding(workflow):
     """00012: severity scale and structured output format travel with the
     embedded build_review_prompt so the runtime prompt is fully specified."""
