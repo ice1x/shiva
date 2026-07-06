@@ -806,12 +806,19 @@ def build_review_prompt(categories, files, conventions="", part=None):
     )
     lines.append(
         "- Cite exact line numbers from the diff. If you are not certain of the line, "
-        "omit the number rather than guess."
+        "omit the number rather than guess. A finding anchored to line 0 or 1 of a "
+        "file means you did not locate the real code — re-check or drop it."
     )
     lines.append(
-        "- Do NOT raise renames, file/module splits, or micro-optimizations unless "
-        "they fix a concrete correctness or clarity bug. Style nits are out of scope "
-        "unless a Code Style category is enabled above."
+        "- Do NOT report a check, field, validation, or handler as missing or absent "
+        "unless its absence is visible in the shown diff; quote the line whose absence "
+        "you assert. If it may exist in code not shown, do not claim it is missing."
+    )
+    lines.append(
+        "- Do NOT raise renames, file/module splits, micro-optimizations, or swapping "
+        "a library / test framework / sync-for-async unless it fixes a concrete "
+        "correctness or clarity bug. Style nits are out of scope unless a Code Style "
+        "category is enabled above."
     )
     lines.append(
         "- A wrong or speculative finding is worse than a missed nit: prefer fewer, "

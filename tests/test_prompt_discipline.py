@@ -27,3 +27,19 @@ def test_prompt_suppresses_nitpicks_and_renames():
 
 def test_prompt_prefers_fewer_verifiable_findings():
     assert "wrong or speculative finding is worse than a missed nit" in _prompt()
+
+
+def test_prompt_forbids_false_missing_claims():
+    # The recurring #90/#92 failure: claiming a check/field is missing when it
+    # exists (outside the shown diff).
+    p = _prompt()
+    assert "missing or absent" in p
+    assert "do not claim it is missing" in p
+
+
+def test_prompt_flags_zero_or_one_line_anchors():
+    assert "anchored to line 0 or 1" in _prompt()
+
+
+def test_prompt_forbids_library_framework_swaps():
+    assert "swapping" in _prompt() and "test framework" in _prompt()

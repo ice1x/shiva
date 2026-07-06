@@ -192,15 +192,22 @@ def local_server_reachable(endpoint: str) -> bool:
     return proc.returncode in (0, 8)
 
 
-def check_providers(config: dict) -> list[tuple[str, list[str], bool, str]]:
-    """Readiness of every mapped provider: ``[(provider, labels, ok, detail)]``.
+def check_providers(
+    config: dict, only_provider: str | None = None
+) -> list[tuple[str, list[str], bool, str]]:
+    """Readiness of mapped providers: ``[(provider, labels, ok, detail)]``.
 
     Hosted → needs an API key; local → needs a reachable server. Covers the
-    default provider and every ``llm_by_repo`` entry.
+    default provider and every ``llm_by_repo`` entry. When ``only_provider`` is
+    given, validates ONLY that provider — used by setup/live so a deploy of one
+    repo's workflow isn't blocked by an unrelated (e.g. a stopped local default)
+    provider it doesn't use. ``check`` passes None to validate the whole config.
     """
     rows = []
     for info in sorted(mapped_providers(config), key=lambda p: p["provider"]):
         provider, labels = info["provider"], info["labels"]
+        if only_provider is not None and provider != only_provider:
+            continue
         if info["needs_key"]:
             ok = bool(resolve_llm_token(provider))
             detail = "key set" if ok else f"no key — set {llm_key_env_var(provider)} in .env"
@@ -214,27 +221,34 @@ def check_providers(config: dict) -> list[tuple[str, list[str], bool, str]]:
     return rows
 
 
-def validate_deployment(config: dict) -> list[tuple[str, list[str], bool, str]]:
+def validate_deployment(
+    config: dict, only_provider: str | None = None
+) -> list[tuple[str, list[str], bool, str]]:
     """Config-validation step: structural check, then per-provider readiness.
 
     Runs *before* any pipeline action so a misconfigured or unprovisioned setup
     exits during validation, not half-way through importing / opening a PR.
+    ``only_provider`` narrows the readiness check to the provider being deployed.
     Structural errors raise ConfigError; returns the provider readiness rows.
     """
     from shiva_agent import review
 
     review.validate_config(config)
-    return check_providers(config)
+    return check_providers(config, only_provider=only_provider)
 
 
-def enforce_deployment() -> None:
-    """Fail early (validation stage) unless the config is valid and every mapped
-    provider — hosted (key) and local (reachable server) — is ready."""
+def enforce_deployment(only_provider: str | None = None) -> None:
+    """Fail early (validation stage) unless the config is valid and the relevant
+    provider(s) — hosted (key) and local (reachable server) — are ready.
+
+    ``only_provider`` scopes the readiness check to the provider actually being
+    deployed, so e.g. a stopped local default does not block deploying a repo
+    whose workflow uses a hosted provider."""
     from shiva_agent import review
 
     config = load_config()
     try:
-        rows = validate_deployment(config)
+        rows = validate_deployment(config, only_provider=only_provider)
     except review.ConfigError as exc:
         sys.exit(f"error: invalid shiva.config.yml: {exc}")
     problems = [r for r in rows if not r[2]]
@@ -423,7 +437,7 @@ def restart_n8n() -> None:
 
 def cmd_setup(args: argparse.Namespace) -> int:
     if not args.dry_run:
-        enforce_deployment()
+        enforce_deployment(only_provider=resolve_llm_provider(args.repo))
     setup_n8n(
         resolve_token(required=not args.dry_run),
         dry_run=args.dry_run,
@@ -517,7 +531,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         print("[dry-run] no n8n import, no webhook, no PR — nothing was changed.")
         return 0
 
-    enforce_deployment()
+    enforce_deployment(only_provider=resolve_llm_provider(args.repo))
     token = resolve_token()
     login = gh_api("user")["login"]
 
