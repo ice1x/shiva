@@ -2,8 +2,12 @@ import pytest
 from faker import Faker
 
 from shiva_agent.review import (
+    DEFAULT_LLM_PROVIDER,
     FETCH_FILE_TOOL_DESCRIPTION,
     FETCH_FILE_TOOL_NAME,
+    LLM_APIS,
+    LLM_PROVIDERS,
+    PROMPT_SENTINEL,
     SEVERITY_LEVELS,
     ConfigError,
     build_agent_system_prompt,
@@ -14,9 +18,11 @@ from shiva_agent.review import (
     resolve_categories,
     resolve_conventions,
     resolve_exclude,
+    resolve_llm,
     should_skip_pr,
     split_files_into_batches,
     validate_config,
+    validate_llm,
 )
 
 fake = Faker()
@@ -613,3 +619,172 @@ class TestFetchFileToolMetadata:
         desc = FETCH_FILE_TOOL_DESCRIPTION.lower()
         assert "path" in desc  # the input the model must supply
         assert "contents" in desc or "text" in desc  # what it returns
+
+
+class TestResolveLlm:
+    """00020: vendor-agnostic — the review LLM is chosen from config, and the
+    default is a free, local, keyless provider (no vendor lock, no bill)."""
+
+    def test_default_is_free_local_keyless_ollama(self):
+        llm = resolve_llm({})
+        assert llm["provider"] == DEFAULT_LLM_PROVIDER == "ollama"
+        assert llm["api"] == "openai"
+        assert llm["auth"] == "none"  # free, no API key
+        assert "11434" in llm["endpoint"]
+        assert llm["model"] == "llama3.2"
+
+    def test_none_config_uses_the_default(self):
+        assert resolve_llm(None)["provider"] == "ollama"
+
+    def test_default_is_not_a_paid_vendor(self):
+        # guard the intent: a fresh clone must not silently bill a paid API
+        assert resolve_llm({})["auth"] == "none"
+        assert LLM_PROVIDERS[DEFAULT_LLM_PROVIDER]["auth"] == "none"
+
+    @pytest.mark.parametrize(
+        "provider,endpoint_has,model,auth",
+        [
+            ("ollama", "11434", "llama3.2", "none"),
+            ("lmstudio", "1234", "local-model", "none"),
+            ("vllm", "8000", "local-model", "none"),
+            ("openrouter", "openrouter.ai", "meta-llama/llama-3.1-8b-instruct:free", "bearer"),
+            ("openai", "api.openai.com", "gpt-4o-mini", "bearer"),
+            ("deepseek", "api.deepseek.com", "deepseek-chat", "bearer"),
+            ("qwen", "dashscope", "qwen-plus", "bearer"),
+            ("anthropic", "api.anthropic.com", "claude-opus-4-8", "x-api-key"),
+        ],
+    )
+    def test_every_provider_resolves(self, provider, endpoint_has, model, auth):
+        llm = resolve_llm({"llm": {"provider": provider}})
+        assert llm["provider"] == provider
+        assert endpoint_has in llm["endpoint"]
+        assert llm["model"] == model
+        assert llm["auth"] == auth
+
+    def test_anthropic_uses_the_messages_api(self):
+        assert resolve_llm({"llm": {"provider": "anthropic"}})["api"] == "anthropic"
+
+    def test_the_openai_family_shares_one_api(self):
+        for provider in ("openai", "deepseek", "qwen", "openrouter", "ollama", "lmstudio", "vllm"):
+            assert resolve_llm({"llm": {"provider": provider}})["api"] == "openai"
+
+    def test_model_override_on_the_default_provider(self):
+        llm = resolve_llm({"llm": {"model": "qwen2.5-coder"}})
+        assert llm["provider"] == "ollama"  # default kept
+        assert llm["model"] == "qwen2.5-coder"
+
+    def test_endpoint_override_for_self_hosted(self):
+        llm = resolve_llm({"llm": {"provider": "ollama", "endpoint": "http://gpu-box:11434/v1/chat/completions"}})
+        assert llm["endpoint"] == "http://gpu-box:11434/v1/chat/completions"
+
+    def test_override_block_replaces_the_base_wholesale(self):
+        base = {"llm": {"provider": "anthropic"}}
+        override = {"llm": {"provider": "openai"}}
+        llm = resolve_llm(base, override)
+        assert llm["provider"] == "openai"  # override wins
+        assert llm["model"] == "gpt-4o-mini"  # not anthropic's model bleeding through
+
+    def test_no_override_uses_the_base_provider(self):
+        assert resolve_llm({"llm": {"provider": "deepseek"}}, None)["provider"] == "deepseek"
+
+    # --- inline / custom providers: the real vendor-agnostic escape hatch ---
+
+    def test_inline_custom_provider_needs_no_preset(self):
+        llm = resolve_llm({"llm": {
+            "api": "openai",
+            "endpoint": "http://my-gateway:9000/v1/chat/completions",
+            "model": "my-model",
+        }})
+        assert llm["provider"] == "custom"
+        assert llm["api"] == "openai"
+        assert llm["endpoint"] == "http://my-gateway:9000/v1/chat/completions"
+        assert llm["model"] == "my-model"
+        assert llm["auth"] == "none"  # defaults to keyless
+
+    def test_named_custom_provider_with_bearer_auth(self):
+        llm = resolve_llm({"llm": {
+            "provider": "my-corp-gateway",
+            "api": "openai",
+            "endpoint": "https://llm.corp.internal/v1/chat/completions",
+            "model": "corp-model",
+            "auth": "bearer",
+        }})
+        assert llm["provider"] == "my-corp-gateway"
+        assert llm["auth"] == "bearer"
+
+    def test_custom_provider_missing_fields_is_rejected(self):
+        with pytest.raises(ConfigError) as exc:
+            resolve_llm({"llm": {"provider": "mystery", "api": "openai"}})
+        assert "mystery" in str(exc.value)
+
+    def test_unknown_provider_without_custom_fields_is_rejected(self):
+        with pytest.raises(ConfigError) as exc:
+            resolve_llm({"llm": {"provider": "gemini"}})
+        assert "gemini" in str(exc.value)
+
+
+class TestValidateLlm:
+    def test_absent_block_is_valid(self):
+        validate_llm(None)
+
+    def test_every_shipped_provider_validates(self):
+        for provider in LLM_PROVIDERS:
+            validate_llm({"provider": provider})
+
+    def test_block_must_be_a_mapping(self):
+        with pytest.raises(ConfigError):
+            validate_llm(["ollama"])
+
+    def test_unknown_api_is_rejected(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_llm({"api": "grpc"})
+        assert "grpc" in str(exc.value)
+
+    def test_unknown_auth_is_rejected(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_llm({"provider": "openai", "auth": "oauth2"})
+        assert "oauth2" in str(exc.value)
+
+    def test_blank_model_is_rejected(self):
+        with pytest.raises(ConfigError):
+            validate_llm({"provider": "openai", "model": "  "})
+
+    def test_non_string_endpoint_is_rejected(self):
+        with pytest.raises(ConfigError):
+            validate_llm({"provider": "ollama", "endpoint": 11434})
+
+    def test_unknown_provider_hint_names_missing_fields(self):
+        with pytest.raises(ConfigError) as exc:
+            validate_llm({"provider": "gemini"})
+        msg = str(exc.value)
+        assert "api" in msg and "endpoint" in msg  # tells the user how to go custom
+
+    def test_llm_is_validated_through_validate_config(self):
+        with pytest.raises(ConfigError):
+            validate_config({"categories": [], "llm": {"api": "nope"}})
+
+
+class TestLlmApiInterface:
+    """The vendor-agnostic seam: two wire protocols implement one interface."""
+
+    def test_both_families_are_registered(self):
+        assert set(LLM_APIS) == {"anthropic", "openai"}
+
+    def test_prompt_sentinel_is_present_in_request_bodies(self):
+        for api in LLM_APIS.values():
+            body = api.request_body("m")
+            assert PROMPT_SENTINEL in str(body)
+
+    def test_openai_reads_choices_message_content(self):
+        assert "choices[0].message.content" in LLM_APIS["openai"].comment_body_expr()
+
+    def test_anthropic_reads_content_text_blocks(self):
+        assert "$json.content" in LLM_APIS["anthropic"].comment_body_expr()
+
+    def test_agent_chat_node_type_per_family(self):
+        assert "lmChatOpenAi" in LLM_APIS["openai"].agent_chat_node("m", "http://h/v1/chat/completions")["type"]
+        assert "lmChatAnthropic" in LLM_APIS["anthropic"].agent_chat_node("m", "x")["type"]
+
+    def test_openai_agent_node_derives_base_url(self):
+        node = LLM_APIS["openai"].agent_chat_node("m", "https://api.deepseek.com/v1/chat/completions")
+        assert node["parameters"]["options"]["baseURL"] == "https://api.deepseek.com/v1"

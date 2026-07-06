@@ -25,8 +25,6 @@ OUTPUT_PATH = REPO_ROOT / "workflows" / "pr_review.json"
 # MVP workflow above stays byte-identical and its CI staleness check is unaffected.
 AGENT_OUTPUT_PATH = REPO_ROOT / "workflows" / "pr_review.agent.json"
 
-ANTHROPIC_MODEL = "claude-opus-4-8"
-
 
 def render_code_node(edit_hint, constants, functions, body):
     """Assemble the source for an n8n Python Code node from its parts.
@@ -134,7 +132,7 @@ return out"""
 # are NOT verifiable without a live n8n LangChain runtime; confirming the agent
 # actually loads and fans out is folded into the E2E task 00008.
 AGENT_NODE = "AI Review Agent"
-CHAT_MODEL_NODE = "Anthropic Chat Model"
+CHAT_MODEL_NODE = "Chat Model"
 FETCH_FILE_TOOL_NODE = "Fetch Repo File"
 
 
@@ -157,19 +155,29 @@ def build_agent_node():
     }
 
 
-def build_chat_model_node():
-    """Anthropic chat model sub-node feeding the agent (ai_languageModel)."""
+def build_chat_model_node(llm):
+    """Chat-model sub-node feeding the agent (ai_languageModel), per provider.
+
+    The wire-protocol object (`LLMApi`) picks the LangChain node type and params
+    — `lmChatAnthropic` for the Anthropic API, `lmChatOpenAi` (with the base URL)
+    for every OpenAI-compatible provider — so the agent variant follows the same
+    vendor-agnostic layer as the single-call review (task 00020).
+    """
+    spec = review.LLM_APIS[llm["api"]].agent_chat_node(llm["model"], llm["endpoint"])
+    auth_header, value_hint = review.llm_auth(llm["auth"])
+    cred = (
+        f"no API key ({llm['provider']} is local/keyless)"
+        if auth_header is None
+        else f"credential '{auth_header}' = '{value_hint}'"
+    )
     return {
         "id": "chat_model",
         "name": CHAT_MODEL_NODE,
-        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
-        "typeVersion": 1.3,
+        "type": spec["type"],
+        "typeVersion": spec["typeVersion"],
         "position": None,
-        "parameters": {
-            "model": {"__rl": True, "mode": "list", "value": ANTHROPIC_MODEL},
-            "options": {"maxTokensToSample": 16000},
-        },
-        "notes": "Credential: Anthropic API (x-api-key) — task 00002.",
+        "parameters": spec["parameters"],
+        "notes": f"LLM: {llm['provider']} ({llm['model']}); {cred}.",
     }
 
 
@@ -219,6 +227,63 @@ def build_fetch_file_tool_node():
     }
 
 
+# --- Provider-agnostic review node (task 00019) -----------------------------
+# The MVP hard-wired the review to Anthropic's Messages API. These helpers build
+# the single-call review node and the comment-extraction expression from the
+# resolved `llm` settings instead, so the same workflow can target Anthropic,
+# OpenAI, DeepSeek, Qwen, or a local Ollama by config alone.
+
+
+def build_review_request_body(llm):
+    """The JSON body for the review HTTP call, as an n8n expression string.
+
+    The wire-protocol object (`LLMApi`) owns the body shape; here we only render
+    it and splice in the prompt via ``JSON.stringify($json.prompt)`` so it is
+    safely escaped.
+    """
+    body = review.LLM_APIS[llm["api"]].request_body(llm["model"])
+    rendered = json.dumps(body, indent=2).replace(
+        f'"{review.PROMPT_SENTINEL}"', "{{ JSON.stringify($json.prompt) }}"
+    )
+    return "=" + rendered  # n8n expressions require a leading '='
+
+
+def build_review_comment_body(llm):
+    """The n8n expression that extracts the review text into a comment body."""
+    return review.LLM_APIS[llm["api"]].comment_body_expr()
+
+
+def build_review_node(llm):
+    """The single-call review HTTP node, targeting the configured provider."""
+    api = review.LLM_APIS[llm["api"]]
+    auth_header, value_hint = review.llm_auth(llm["auth"])
+    if auth_header is None:
+        cred_note = f"No API key required ({llm['provider']} is local/keyless)."
+    else:
+        cred_note = f"Credential: HTTP Header Auth '{auth_header}' = '{value_hint}'."
+    node = {
+        "id": "llm_review",
+        "name": "LLM Review",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": None,
+        "parameters": {
+            "method": "POST",
+            "url": llm["endpoint"],
+            "sendHeaders": True,
+            "headerParameters": {"parameters": api.http_headers()},
+            "sendBody": True,
+            "specifyBody": "json",
+            "jsonBody": build_review_request_body(llm),
+        },
+        "notes": f"LLM: {llm['provider']} ({llm['model']}). {cred_note}",
+    }
+    if auth_header is not None:
+        node["parameters"]["authentication"] = "genericCredentialType"
+        node["parameters"]["genericAuthType"] = "httpHeaderAuth"
+    return node
+
+
 def build_workflow(config_path, override_path=None, agent=False):
     """Build the n8n workflow from the default config.
 
@@ -226,7 +291,7 @@ def build_workflow(config_path, override_path=None, agent=False):
     are merged over the defaults by `id` (task 00014) before being embedded, so
     a per-repo review configuration can be baked into a repo-specific workflow.
 
-    When `agent` is true, the single-call `Claude Review` node is replaced by an
+    When `agent` is true, the single-call `LLM Review` node is replaced by an
     AI Agent node wired to a chat model and a `fetch_repo_file` tool, so the
     model can request extra repository files for context (task 00013). The
     upstream skip-gate / fetch / filter pipeline is identical in both variants.
@@ -236,6 +301,7 @@ def build_workflow(config_path, override_path=None, agent=False):
     enabled = review.resolve_categories(config, override)
     conventions = review.resolve_conventions(config, override)
     exclude_globs = review.resolve_exclude(config, override)
+    llm = review.resolve_llm(config, override)
 
     webhook = {
         "id": "webhook",
@@ -333,40 +399,7 @@ def build_workflow(config_path, override_path=None, agent=False):
         },
     }
 
-    llm = {
-        "id": "llm_review",
-        "name": "Claude Review",
-        "type": "n8n-nodes-base.httpRequest",
-        "typeVersion": 4.2,
-        "position": None,
-        "parameters": {
-            "method": "POST",
-            "url": "https://api.anthropic.com/v1/messages",
-            "authentication": "genericCredentialType",
-            "genericAuthType": "httpHeaderAuth",
-            "sendHeaders": True,
-            "headerParameters": {
-                "parameters": [
-                    {"name": "anthropic-version", "value": "2023-06-01"},
-                    {"name": "content-type", "value": "application/json"},
-                ]
-            },
-            "sendBody": True,
-            "specifyBody": "json",
-            "jsonBody": json.dumps(
-                {
-                    "model": ANTHROPIC_MODEL,
-                    "max_tokens": 16000,
-                    "thinking": {"type": "adaptive"},
-                    "messages": [{"role": "user", "content": "{{ $json.prompt }}"}],
-                },
-                indent=2,
-            ).replace('"{{ $json.prompt }}"', "{{ JSON.stringify($json.prompt) }}"),
-        },
-        "notes": "Credential: HTTP Header Auth with name 'x-api-key', value '<Anthropic API key>'.",
-    }
-    # n8n expressions require a leading '=' on the whole value
-    llm["parameters"]["jsonBody"] = "=" + llm["parameters"]["jsonBody"]
+    review_node = build_review_node(llm)
 
     post_comment = {
         "id": "post_comment",
@@ -388,7 +421,7 @@ def build_workflow(config_path, override_path=None, agent=False):
             },
             "sendBody": True,
             "specifyBody": "json",
-            "jsonBody": "={{ JSON.stringify({ body: $json.content.filter(b => b.type === 'text').map(b => b.text).join('\\n') }) }}",
+            "jsonBody": build_review_comment_body(llm),
             "options": {},
         },
         "notes": "Same GitHub PAT credential as 'Fetch PR Files'.",
@@ -411,7 +444,7 @@ def build_workflow(config_path, override_path=None, agent=False):
 
     if agent:
         review_agent = build_agent_node()
-        chat_model = build_chat_model_node()
+        chat_model = build_chat_model_node(llm)
         fetch_tool = build_fetch_file_tool_node()
         # The agent emits its answer as plain text on $json.output.
         agent_post_comment = dict(post_comment)
@@ -449,7 +482,7 @@ def build_workflow(config_path, override_path=None, agent=False):
             "active": False,
         }
 
-    nodes = prefix + [llm, post_comment]
+    nodes = prefix + [review_node, post_comment]
     # Lay the nodes out left-to-right in execution order; deriving each position
     # from its index means inserting a node never rewrites downstream ones.
     for i, node in enumerate(nodes):
@@ -457,9 +490,9 @@ def build_workflow(config_path, override_path=None, agent=False):
 
     connections = dict(common_connections)
     connections["Filter Diff & Build Prompt"] = {
-        "main": [[{"node": "Claude Review", "type": "main", "index": 0}]]
+        "main": [[{"node": "LLM Review", "type": "main", "index": 0}]]
     }
-    connections["Claude Review"] = {"main": [[{"node": "Post PR Comment", "type": "main", "index": 0}]]}
+    connections["LLM Review"] = {"main": [[{"node": "Post PR Comment", "type": "main", "index": 0}]]}
 
     return {
         "id": "ShivaPrReview001",

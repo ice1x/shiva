@@ -28,6 +28,188 @@ SEVERITY_LEVELS = [
 # review on every label change.
 REVIEWABLE_ACTIONS = frozenset({"opened", "reopened", "ready_for_review", "synchronize"})
 
+# ---------------------------------------------------------------------------
+# Vendor-agnostic LLM layer (task 00020)
+# ---------------------------------------------------------------------------
+# The review step must not be tied to one vendor. A *provider* is nothing but an
+# HTTP endpoint + a model name + an auth scheme, bound to one of a small set of
+# wire protocols ("API families"). Two families cover essentially the whole
+# market: Anthropic's Messages API, and the OpenAI `/chat/completions` API that
+# OpenAI, DeepSeek, Qwen, OpenRouter, Ollama, vLLM and LM Studio all speak.
+#
+# Adding a brand-new wire protocol = one `LLMApi` subclass. Adding a vendor that
+# speaks an existing protocol = one row in `LLM_PROVIDERS` — or nothing at all:
+# a config block may define a provider inline (`api` + `endpoint` + `model`
+# [+ `auth`]), so any OpenAI-/Anthropic-compatible server works without a code
+# change. This layer is build-time only (never embedded in the n8n Code node),
+# so it is free to use classes.
+PROMPT_SENTINEL = "__SHIVA_PROMPT__"  # replaced with the n8n prompt expression at build time
+MAX_OUTPUT_TOKENS = 16000
+
+
+class LLMApi:
+    """Interface for one LLM wire protocol — the vendor-agnostic seam.
+
+    A concrete family describes, in provider-neutral terms, *how* to call the
+    API and *where* the review text lives in the response. `build_workflow`
+    turns that into the actual n8n nodes; nothing here knows about a vendor.
+    """
+
+    api = ""
+
+    def request_body(self, model):
+        """Return the JSON request body, with PROMPT_SENTINEL where the prompt goes."""
+        raise NotImplementedError
+
+    def comment_body_expr(self):
+        """Return the n8n expression that extracts the review text from the response."""
+        raise NotImplementedError
+
+    def http_headers(self):
+        """Return protocol-specific HTTP headers (auth is added separately)."""
+        return [{"name": "content-type", "value": "application/json"}]
+
+    def agent_chat_node(self, model, endpoint):
+        """Return {type, typeVersion, parameters} for the agent variant's chat sub-node."""
+        raise NotImplementedError
+
+
+class AnthropicApi(LLMApi):
+    """Anthropic Messages API — typed `content` blocks, adaptive thinking."""
+
+    api = "anthropic"
+
+    def request_body(self, model):
+        return {
+            "model": model,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "thinking": {"type": "adaptive"},
+            "messages": [{"role": "user", "content": PROMPT_SENTINEL}],
+        }
+
+    def comment_body_expr(self):
+        return (
+            "={{ JSON.stringify({ body: $json.content"
+            ".filter(b => b.type === 'text').map(b => b.text).join('\\n') }) }}"
+        )
+
+    def http_headers(self):
+        return [
+            {"name": "anthropic-version", "value": "2023-06-01"},
+            {"name": "content-type", "value": "application/json"},
+        ]
+
+    def agent_chat_node(self, model, endpoint):
+        return {
+            "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+            "typeVersion": 1.3,
+            "parameters": {
+                "model": {"__rl": True, "mode": "list", "value": model},
+                "options": {"maxTokensToSample": MAX_OUTPUT_TOKENS},
+            },
+        }
+
+
+class OpenAIApi(LLMApi):
+    """OpenAI `/chat/completions` — spoken by OpenAI, DeepSeek, Qwen, OpenRouter,
+    Ollama, vLLM, LM Studio and most self-hosted gateways."""
+
+    api = "openai"
+
+    def request_body(self, model):
+        return {
+            "model": model,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "messages": [{"role": "user", "content": PROMPT_SENTINEL}],
+        }
+
+    def comment_body_expr(self):
+        return "={{ JSON.stringify({ body: $json.choices[0].message.content }) }}"
+
+    def agent_chat_node(self, model, endpoint):
+        base_url = endpoint.rsplit("/chat/completions", 1)[0]
+        return {
+            "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+            "typeVersion": 1.2,
+            "parameters": {
+                "model": {"__rl": True, "mode": "list", "value": model},
+                "options": {"baseURL": base_url, "maxTokens": MAX_OUTPUT_TOKENS},
+            },
+        }
+
+
+# Registry of API families. Add a subclass here to support a new wire protocol.
+LLM_APIS = {api.api: api for api in (AnthropicApi(), OpenAIApi())}
+
+# Auth schemes: how (or whether) the API key rides on the request. `header` is
+# the HTTP Header Auth credential name; `value_hint` is what the operator puts
+# in it. `none` is a keyless local server.
+AUTH_SCHEMES = {
+    "none": {"header": None, "value_hint": None},
+    "bearer": {"header": "Authorization", "value_hint": "Bearer <API key>"},
+    "x-api-key": {"header": "x-api-key", "value_hint": "<API key>"},
+}
+
+# Provider presets: endpoint + default model + auth for known vendors. Local,
+# free, keyless providers come first, and the default is one of them ON PURPOSE
+# so the out-of-the-box workflow costs nothing and locks in no vendor. The local
+# endpoints use `host.docker.internal` because n8n runs in a container (see
+# docker-compose.yml); a natively-run n8n should override `endpoint` to
+# `localhost`. `model`/`endpoint`/`auth` are all overridable per repo.
+LLM_PROVIDERS = {
+    "ollama": {
+        "api": "openai",
+        "endpoint": "http://host.docker.internal:11434/v1/chat/completions",
+        "default_model": "llama3.2",
+        "auth": "none",
+    },
+    "lmstudio": {
+        "api": "openai",
+        "endpoint": "http://host.docker.internal:1234/v1/chat/completions",
+        "default_model": "local-model",  # set llm.model to your loaded model id
+        "auth": "none",
+    },
+    "vllm": {
+        "api": "openai",
+        "endpoint": "http://host.docker.internal:8000/v1/chat/completions",
+        "default_model": "local-model",  # set llm.model to the served model id
+        "auth": "none",
+    },
+    "openrouter": {
+        "api": "openai",
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "default_model": "meta-llama/llama-3.1-8b-instruct:free",  # a free model
+        "auth": "bearer",
+    },
+    "openai": {
+        "api": "openai",
+        "endpoint": "https://api.openai.com/v1/chat/completions",
+        "default_model": "gpt-4o-mini",
+        "auth": "bearer",
+    },
+    "deepseek": {
+        "api": "openai",
+        "endpoint": "https://api.deepseek.com/v1/chat/completions",
+        "default_model": "deepseek-chat",
+        "auth": "bearer",
+    },
+    "qwen": {
+        "api": "openai",
+        # Alibaba DashScope OpenAI-compatible mode (international endpoint).
+        "endpoint": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "default_model": "qwen-plus",
+        "auth": "bearer",
+    },
+    "anthropic": {
+        "api": "anthropic",
+        "endpoint": "https://api.anthropic.com/v1/messages",
+        "default_model": "claude-opus-4-8",
+        "auth": "x-api-key",
+    },
+}
+# Free, local, keyless — no vendor lock and no bill for a fresh clone.
+DEFAULT_LLM_PROVIDER = "ollama"
+
 # Name of the tool the AI Agent variant exposes so the model can pull extra
 # repository files for context (task 00013). Referenced both in the agent's
 # system prompt (below) and as the generated n8n tool node's name, so the two
@@ -151,6 +333,8 @@ def validate_config(config, partial=False, require_enabled=False):
             if not isinstance(pattern, str) or not pattern.strip():
                 raise ConfigError(f"exclude[{i}] must be a non-empty string glob pattern")
 
+    validate_llm(config.get("llm"))
+
     categories = config.get("categories", [])
     if not isinstance(categories, list):
         raise ConfigError(
@@ -192,6 +376,110 @@ def validate_config(config, partial=False, require_enabled=False):
                 "no review categories are enabled; enable at least one category "
                 "with 'enabled: true' so the review has something to check"
             )
+
+
+def validate_llm(llm):
+    """Validate an `llm` config block (task 00020), raising a clear ConfigError.
+
+    The block is optional (absent → the default provider). It may either name a
+    known `provider` (optionally overriding `model`/`endpoint`/`auth`), or define
+    a provider inline for any compatible server via `api` + `endpoint`
+    (+ `model`, and `auth` if the server needs a key). Rules:
+
+    - the block is a mapping;
+    - `api` (if given) is a known family and `auth` (if given) a known scheme;
+    - `provider`/`model`/`endpoint` (if given) are non-empty strings;
+    - a `provider` that is not a known preset is treated as an inline/custom
+      provider and must supply `api` + `endpoint` + `model`, else it is rejected.
+
+    Returns None on success.
+    """
+    if llm is None:
+        return
+    if not isinstance(llm, dict):
+        raise ConfigError(f"llm must be a mapping, got {type(llm).__name__}")
+
+    for field in ("provider", "model", "endpoint"):
+        value = llm.get(field)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ConfigError(f"llm.{field} must be a non-empty string")
+
+    api = llm.get("api")
+    if api is not None and api not in LLM_APIS:
+        known = ", ".join(sorted(LLM_APIS))
+        raise ConfigError(f"llm.api {api!r} is not supported; choose one of: {known}")
+
+    auth = llm.get("auth")
+    if auth is not None and auth not in AUTH_SCHEMES:
+        known = ", ".join(sorted(AUTH_SCHEMES))
+        raise ConfigError(f"llm.auth {auth!r} is not supported; choose one of: {known}")
+
+    provider = llm.get("provider")
+    if provider is not None and provider not in LLM_PROVIDERS:
+        # Unknown name is allowed only as an inline/custom provider, which must
+        # fully specify how to reach it.
+        missing = [k for k in ("api", "endpoint", "model") if not llm.get(k)]
+        if missing:
+            known = ", ".join(LLM_PROVIDERS)
+            raise ConfigError(
+                f"llm.provider {provider!r} is not a known provider ({known}); "
+                f"to use a custom endpoint also set: {', '.join(missing)}"
+            )
+
+
+def resolve_llm(config, override=None):
+    """Resolve the effective LLM provider spec (task 00020).
+
+    Vendor-agnostic: the winning `llm` block (override *replaces* the base
+    wholesale, the same rule as `conventions`/`exclude`) either names a known
+    `provider` — with optional `model`/`endpoint`/`auth` overrides — or defines a
+    provider inline via `api` + `endpoint` (+ `model`, + `auth`) for any
+    compatible server. An empty or absent block yields `DEFAULT_LLM_PROVIDER`, a
+    free, local, keyless provider, so a fresh clone costs nothing and locks in no
+    vendor.
+
+    Returns ``{provider, api, endpoint, model, auth}`` where `api` is the wire
+    protocol (a key of `LLM_APIS`) and `auth` is a key of `AUTH_SCHEMES`.
+    """
+    for src in (override, config):
+        block = (src or {}).get("llm")
+        if block:
+            break
+    else:
+        block = {}
+    validate_llm(block)
+
+    provider = block.get("provider")
+    inline = provider is None and any(k in block for k in ("api", "endpoint"))
+    if provider in LLM_PROVIDERS or (provider is None and not inline):
+        # A known provider preset (or the default when nothing is specified),
+        # with optional field overrides.
+        name = provider or DEFAULT_LLM_PROVIDER
+        preset = LLM_PROVIDERS[name]
+        api = block.get("api") or preset["api"]
+        endpoint = block.get("endpoint") or preset["endpoint"]
+        model = block.get("model") or preset["default_model"]
+        auth = block.get("auth") or preset["auth"]
+    else:
+        # Inline/custom provider — no preset to fall back on, so it must be
+        # fully specified.
+        name = provider or "custom"
+        api = block.get("api")
+        endpoint = block.get("endpoint")
+        model = block.get("model")
+        auth = block.get("auth") or "none"
+        missing = [k for k, v in (("api", api), ("endpoint", endpoint), ("model", model)) if not v]
+        if missing:
+            raise ConfigError(
+                f"custom llm provider {name!r} must set: {', '.join(missing)}"
+            )
+    return {"provider": name, "api": api, "endpoint": endpoint, "model": model, "auth": auth}
+
+
+def llm_auth(auth):
+    """Return ``(header_name_or_None, value_hint_or_None)`` for an auth scheme."""
+    scheme = AUTH_SCHEMES[auth]
+    return scheme["header"], scheme["value_hint"]
 
 
 def merge_config(base, override):

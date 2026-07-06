@@ -24,6 +24,12 @@ services:
       - N8N_NATIVE_PYTHON_RUNNER=true
     volumes:
       - n8n_data:/home/node/.n8n
+    # Lets the review's HTTP node reach a model server running on the host
+    # (default LLM provider is a local Ollama at host.docker.internal:11434,
+    # task 00020). host-gateway makes host.docker.internal resolve on Linux too,
+    # matching Docker Desktop on macOS/Windows.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # Task-runner sidecar executing Code-node scripts. Its version must match
   # the n8n image; both read the same N8N_VERSION so pinning is atomic.

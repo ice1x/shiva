@@ -314,21 +314,136 @@ def test_code_node_reviews_only_the_surviving_files(workflow):
     assert out[0]["pairedItem"] == {"item": 0}
 
 
-def test_llm_node_uses_current_anthropic_api(workflow):
-    llm = [
-        n
-        for n in node_by_type(workflow, "n8n-nodes-base.httpRequest")
-        if "anthropic" in n["parameters"]["url"]
-    ][0]
-    body = llm["parameters"]["jsonBody"]
+def _review_node(workflow):
+    return next(n for n in workflow["nodes"] if n["name"] == "LLM Review")
+
+
+def _post_comment(workflow):
+    return next(n for n in workflow["nodes"] if n["name"] == "Post PR Comment")
+
+
+def _override_llm(tmp_path, provider, **fields):
+    lines = ["llm:", f"  provider: {provider}"]
+    for k, v in fields.items():
+        lines.append(f"  {k}: {v}")
+    # keep a valid enabled category set (override only touches llm)
+    path = tmp_path / ".shiva.yml"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_default_review_node_is_free_local_ollama(workflow):
+    """00020: out of the box the review targets a free, local, keyless provider
+    (Ollama) — no vendor lock and no bill for a fresh clone."""
+    node = _review_node(workflow)
+    assert "11434" in node["parameters"]["url"]  # local Ollama
+    assert "llama3.2" in node["parameters"]["jsonBody"]
+    assert '"adaptive"' not in node["parameters"]["jsonBody"]  # openai schema, no thinking block
+    assert "authentication" not in node["parameters"]  # keyless: no credential requested
+    # OpenAI response shape is parsed for the comment body
+    assert "$json.choices[0].message.content" in _post_comment(workflow)["parameters"]["jsonBody"]
+
+
+@pytest.mark.parametrize(
+    "provider,url_has,model",
+    [
+        ("openrouter", "openrouter.ai", "meta-llama/llama-3.1-8b-instruct:free"),
+        ("openai", "api.openai.com", "gpt-4o-mini"),
+        ("deepseek", "api.deepseek.com", "deepseek-chat"),
+        ("qwen", "dashscope", "qwen-plus"),
+        ("lmstudio", "1234", "local-model"),
+        ("vllm", "8000", "local-model"),
+        ("ollama", "11434", "llama3.2"),
+    ],
+)
+def test_review_node_switches_to_openai_family_provider(tmp_path, provider, url_has, model):
+    """00020: any OpenAI-compatible provider retargets the review node."""
+    wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, provider))
+    node = _review_node(wf)
+    body = node["parameters"]["jsonBody"]
+    assert url_has in node["parameters"]["url"]
+    assert model in body
+    assert '"adaptive"' not in body  # openai-compatible: no anthropic thinking block
+    header_names = [h["name"] for h in node["parameters"]["headerParameters"]["parameters"]]
+    assert "anthropic-version" not in header_names
+    assert "$json.choices[0].message.content" in _post_comment(wf)["parameters"]["jsonBody"]
+
+
+def test_anthropic_is_still_available_as_an_opt_in(tmp_path):
+    """Anthropic is one provider among many now — reachable, just not the default."""
+    wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, "anthropic"))
+    node = _review_node(wf)
+    body = node["parameters"]["jsonBody"]
+    assert node["parameters"]["url"] == "https://api.anthropic.com/v1/messages"
     assert "claude-opus-4-8" in body
-    assert '"adaptive"' in body  # adaptive thinking, no budget_tokens
-    assert "budget_tokens" not in body
-    headers = {
-        h["name"]: h["value"]
-        for h in llm["parameters"]["headerParameters"]["parameters"]
-    }
+    assert '"adaptive"' in body  # anthropic thinking block
+    assert "$json.content" in _post_comment(wf)["parameters"]["jsonBody"]
+    headers = {h["name"]: h["value"] for h in node["parameters"]["headerParameters"]["parameters"]}
     assert headers["anthropic-version"] == "2023-06-01"
+
+
+def test_keyless_providers_need_no_credential(tmp_path):
+    """Local Ollama/LM Studio/vLLM have no API key — the node must not request auth."""
+    for provider in ("ollama", "lmstudio", "vllm"):
+        wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, provider))
+        params = _review_node(wf)["parameters"]
+        assert "authentication" not in params, provider
+        assert "genericAuthType" not in params, provider
+
+
+def test_keyed_providers_use_header_auth(tmp_path):
+    for provider in ("openai", "deepseek", "qwen", "openrouter", "anthropic"):
+        wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, provider))
+        params = _review_node(wf)["parameters"]
+        assert params["authentication"] == "genericCredentialType", provider
+        assert params["genericAuthType"] == "httpHeaderAuth", provider
+
+
+def test_inline_custom_provider_targets_any_endpoint(tmp_path):
+    """00020: the vendor-agnostic escape hatch — a repo points the review at any
+    OpenAI-compatible server with no preset, no code change."""
+    override = tmp_path / ".shiva.yml"
+    override.write_text(
+        "llm:\n"
+        "  api: openai\n"
+        "  endpoint: http://my-gateway:9000/v1/chat/completions\n"
+        "  model: my-model\n"
+    )
+    wf = build_workflow(CONFIG_PATH, override_path=override)
+    node = _review_node(wf)
+    assert node["parameters"]["url"] == "http://my-gateway:9000/v1/chat/completions"
+    assert "my-model" in node["parameters"]["jsonBody"]
+    assert "authentication" not in node["parameters"]  # auth defaults to keyless
+
+
+def test_llm_model_override_is_baked_in(tmp_path):
+    wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, "deepseek", model="deepseek-reasoner"))
+    assert "deepseek-reasoner" in _review_node(wf)["parameters"]["jsonBody"]
+
+
+def test_build_rejects_an_unknown_llm_provider(tmp_path):
+    from shiva_agent.review import ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, "gemini"))
+    assert "gemini" in str(exc.value)
+
+
+def test_agent_variant_switches_chat_model_for_openai_providers(tmp_path):
+    """00020: the agent variant's chat-model sub-node follows the provider too —
+    OpenAI-compatible providers use lmChatOpenAi with the provider's base URL."""
+    wf = build_workflow(CONFIG_PATH, override_path=_override_llm(tmp_path, "deepseek"), agent=True)
+    model_node = next(n for n in wf["nodes"] if n["name"] == "Chat Model")
+    assert model_node["type"] == "@n8n/n8n-nodes-langchain.lmChatOpenAi"
+    assert model_node["parameters"]["options"]["baseURL"] == "https://api.deepseek.com/v1"
+    assert model_node["parameters"]["model"]["value"] == "deepseek-chat"
+
+
+def test_agent_variant_default_chat_model_is_ollama(agent_workflow):
+    """The default agent variant follows the default provider (local Ollama)."""
+    model_node = next(n for n in agent_workflow["nodes"] if n["name"] == "Chat Model")
+    assert model_node["type"] == "@n8n/n8n-nodes-langchain.lmChatOpenAi"
+    assert "11434" in model_node["parameters"]["options"]["baseURL"]
 
 
 # --- AI Agent variant (task 00013) -----------------------------------------
@@ -344,12 +459,12 @@ def test_agent_variant_does_not_change_the_default_workflow():
 def test_agent_workflow_replaces_the_llm_call_with_an_agent(agent_workflow):
     types = [n["type"] for n in agent_workflow["nodes"]]
     assert "@n8n/n8n-nodes-langchain.agent" in types
-    assert "@n8n/n8n-nodes-langchain.lmChatAnthropic" in types
+    # a LangChain chat-model sub-node is present (its family follows the provider)
+    assert any(t.startswith("@n8n/n8n-nodes-langchain.lmChat") for t in types)
     assert "@n8n/n8n-nodes-langchain.toolHttpRequest" in types
-    # the single-call Claude Review HTTP node is gone in this variant
+    # the single-call review HTTP node is gone in this variant
     assert not any(
-        n["type"] == "n8n-nodes-base.httpRequest" and "anthropic" in n["parameters"]["url"]
-        for n in agent_workflow["nodes"]
+        n["name"] == "LLM Review" for n in agent_workflow["nodes"]
     )
 
 
@@ -367,7 +482,7 @@ def test_agent_workflow_reuses_the_skip_and_filter_pipeline(agent_workflow):
 
 def test_agent_model_and_tool_attach_via_langchain_connection_types(agent_workflow):
     connections = agent_workflow["connections"]
-    model = connections["Anthropic Chat Model"]["ai_languageModel"][0][0]
+    model = connections["Chat Model"]["ai_languageModel"][0][0]
     assert model["node"] == "AI Review Agent"
     assert model["type"] == "ai_languageModel"
     tool = connections["Fetch Repo File"]["ai_tool"][0][0]
