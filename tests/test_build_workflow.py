@@ -121,6 +121,32 @@ def test_code_nodes_share_the_generated_template(workflow):
         assert runner_comment in script, node["name"]
 
 
+def test_build_with_repo_override_merges_categories(tmp_path):
+    """00014: a per-repo override file is merged over the defaults by id —
+    disabled defaults drop out of the embedded prompt, new categories appear."""
+    override = tmp_path / ".shiva.yml"
+    override.write_text(
+        "categories:\n"
+        "  - id: performance\n"
+        "    enabled: false\n"
+        "  - id: i18n\n"
+        "    name: Internationalization Review\n"
+        "    enabled: true\n"
+        "    prompt: Check that user-facing strings are translated.\n"
+    )
+    workflow = build_workflow(CONFIG_PATH, override_path=override)
+    code = next(n for n in workflow["nodes"] if n["name"] == "Filter Diff & Build Prompt")
+    script = code["parameters"]["pythonCode"]
+    assert "Internationalization Review" in script  # custom category added
+    assert "Performance Review" not in script  # default disabled by the override
+    assert "Structural Review" in script  # other defaults untouched
+
+
+def test_build_without_override_matches_default():
+    """Passing no override must not change the generated workflow."""
+    assert build_workflow(CONFIG_PATH) == build_workflow(CONFIG_PATH, override_path=None)
+
+
 def test_llm_node_uses_current_anthropic_api(workflow):
     llm = [
         n

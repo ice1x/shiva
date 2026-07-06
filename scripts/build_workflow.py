@@ -7,6 +7,7 @@ the workflow never drifts from the tested code.
 Usage: python scripts/build_workflow.py  →  writes workflows/pr_review.json
 """
 
+import argparse
 import inspect
 import json
 import sys
@@ -81,9 +82,16 @@ return [{"json": {"prompt": prompt, "reviewed_files": len(kept), "total_files": 
     )
 
 
-def build_workflow(config_path):
+def build_workflow(config_path, override_path=None):
+    """Build the n8n workflow from the default config.
+
+    When `override_path` points at a target repo's `.shiva.yml`, its categories
+    are merged over the defaults by `id` (task 00014) before being embedded, so
+    a per-repo review configuration can be baked into a repo-specific workflow.
+    """
     config = yaml.safe_load(Path(config_path).read_text())
-    enabled = review.load_enabled_categories(config)
+    override = yaml.safe_load(Path(override_path).read_text()) if override_path else None
+    enabled = review.resolve_categories(config, override)
 
     webhook = {
         "id": "webhook",
@@ -273,11 +281,27 @@ def build_workflow(config_path):
     }
 
 
-def main():
-    workflow = build_workflow(REPO_ROOT / "shiva.config.yml")
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(workflow, indent=2) + "\n")
-    print(f"wrote {OUTPUT_PATH.relative_to(REPO_ROOT)}")
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--override",
+        metavar="PATH",
+        help="a target repo's .shiva.yml, merged over the defaults by category id",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        metavar="PATH",
+        default=OUTPUT_PATH,
+        type=Path,
+        help=f"where to write the workflow JSON (default: {OUTPUT_PATH.relative_to(REPO_ROOT)})",
+    )
+    args = parser.parse_args(argv)
+
+    workflow = build_workflow(REPO_ROOT / "shiva.config.yml", override_path=args.override)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(workflow, indent=2) + "\n")
+    print(f"wrote {args.output}")
 
 
 if __name__ == "__main__":

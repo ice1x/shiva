@@ -43,9 +43,35 @@ list with your own `id`, `name`, and `prompt` (see the commented example in
 built-in ones.
 
 `shiva.config.yml` in this repo is the default configuration and reference
-schema. A target repository will be able to override it with its own
-`.shiva.yml` at the repo root, merged over the defaults by category `id`
-(task `00014`).
+schema. A target repository overrides it with its own `.shiva.yml`, merged over
+the defaults by category `id` (task `00014`) — see
+[Per-repo configuration](#per-repo-configuration).
+
+### Per-repo configuration
+
+A target repo tailors the review by shipping a `.shiva.yml` that is merged over
+[`shiva.config.yml`](shiva.config.yml) **by category `id`**:
+
+- an entry whose `id` matches a default overrides only the fields it lists —
+  `{id: performance, enabled: false}` just turns that category off and keeps its
+  name and prompt;
+- an entry with a new `id` is added as a first-class custom category;
+- defaults left unmentioned are untouched, and their order is preserved.
+
+The merge is implemented and unit-tested in
+[`merge_config`](src/shiva_agent/review.py). Because review categories are
+resolved and embedded into the Code node at build time, a per-repo workflow is
+produced by pointing the generator at the override file:
+
+```bash
+.venv/bin/python scripts/build_workflow.py \
+    --override path/to/target-repo/.shiva.yml \
+    -o workflows/pr_review.<repo>.json
+```
+
+Auto-fetching `.shiva.yml` from the target repo at run time (one shared workflow
+for all repos) is a future step: it needs YAML parsing inside the n8n Python
+Code node, which the stock native runner does not provide.
 
 ## Run n8n locally
 
@@ -111,7 +137,7 @@ Ordered by priority (highest first). Check off as you go.
 - [ ] `00011` — Handle large PRs: split diffs per file and review in a Loop node
 - [ ] `00012` — Tune the review prompt based on real feedback quality (add repo conventions, severity levels, output format)
 - [ ] `00013` — Experiment with the AI Agent node + tools so the model can request extra repo files for context
-- [ ] `00014` — Per-repo overrides: let a target repo ship its own `.shiva.yml`, merged over the defaults in [`shiva.config.yml`](shiva.config.yml) by category `id`
+- [x] `00014` — Per-repo overrides: a target repo ships its own `.shiva.yml`, merged over the defaults in [`shiva.config.yml`](shiva.config.yml) by category `id` — see [Per-repo configuration](#per-repo-configuration) (build-time merge via `--override`; runtime auto-fetch is a follow-up)
 
 ## Definition of Done (MVP)
 
