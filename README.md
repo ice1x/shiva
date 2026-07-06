@@ -135,6 +135,26 @@ an HTTP Header Auth credential `Authorization: Bearer <GitHub PAT>` on the two
 GitHub nodes and `x-api-key: <Anthropic API key>` on the Claude node, plus a
 tunnel `WEBHOOK_URL` for real webhooks (task `00003`).
 
+### Large PRs
+
+A big pull request is not squeezed into one oversized prompt (task `00011`).
+After filtering, `Filter Diff & Build Prompt` packs the kept files into
+size-bounded batches with `split_files_into_batches` — greedily, in order,
+keeping each batch's combined patch length within `DEFAULT_MAX_BATCH_CHARS`
+(45k; a single file that alone exceeds the budget still gets its own pass and
+is never dropped). The Code node then returns **one item per batch**, so n8n
+fans out natively: one `Claude Review` call and one `Post PR Comment` per
+batch. Each prompt is told which part it is (`review part i of N`) so the
+model scopes findings to the files shown instead of flagging the split-off
+files as missing, and every emitted item pins `pairedItem` to the single
+webhook event so `Post PR Comment` still resolves the PR to comment on.
+
+This uses n8n's basic multi-item fan-out (not a stateful Loop / Split-In-Batches
+node). The batching logic and the generated Code node are unit-tested and the
+embedded script is exercised against sample PRs; confirming that multiple
+comments actually post on a real large PR is part of the end-to-end test
+(task `00008`), which needs live credentials.
+
 ## Task List
 
 Ordered by priority (highest first). Check off as you go.
@@ -149,7 +169,7 @@ Ordered by priority (highest first). Check off as you go.
 - [ ] `00008` — End-to-end test: open a PR with intentionally flawed code and verify the review comment appears
 - [ ] `00009` — Start using it: enable the workflow on 1–2 active pet project repos
 - [x] `00010` — Add an IF node to skip draft PRs and PRs labeled `skip-review`
-- [ ] `00011` — Handle large PRs: split diffs per file and review in a Loop node
+- [x] `00011` — Handle large PRs: the diff is packed into size-bounded batches (`split_files_into_batches`, budget `DEFAULT_MAX_BATCH_CHARS`) and the Code node emits one item per batch, so n8n reviews a big PR in several passes (one Claude call + one comment per batch) — see [Large PRs](#large-prs)
 - [x] `00012` — Tune the review prompt: a defined severity scale (blocker/high/medium/low), a fixed output format (Summary / Verdict / ordered Findings), and per-repo `conventions` injected from `.shiva.yml` — see [Per-repo configuration](#per-repo-configuration)
 - [ ] `00013` — Experiment with the AI Agent node + tools so the model can request extra repo files for context
 - [x] `00014` — Per-repo overrides: a target repo ships its own `.shiva.yml`, merged over the defaults in [`shiva.config.yml`](shiva.config.yml) by category `id` — see [Per-repo configuration](#per-repo-configuration) (build-time merge via `--override`; runtime auto-fetch is a follow-up)

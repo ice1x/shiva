@@ -6,6 +6,12 @@ dependency-free (standard library only) and self-contained.
 """
 
 DEFAULT_MAX_PATCH_CHARS = 15_000
+# Total patch budget per review pass (task 00011). A large PR is reviewed in
+# several passes instead of one oversized prompt: files are packed into batches
+# whose combined patch length stays within this budget, and each batch becomes
+# its own review. Kept comfortably above DEFAULT_MAX_PATCH_CHARS so a batch can
+# still hold a few average files while a single big file gets its own pass.
+DEFAULT_MAX_BATCH_CHARS = 45_000
 SKIP_REVIEW_LABEL = "skip-review"
 # Severity scale the model must apply to every finding (task 00012). Defining
 # each level in the prompt keeps ratings consistent across reviews instead of
@@ -132,19 +138,60 @@ def filter_files(files, allowed_extensions=None, max_patch_chars=DEFAULT_MAX_PAT
     return kept
 
 
-def build_review_prompt(categories, files, conventions=""):
+def split_files_into_batches(files, max_batch_chars=DEFAULT_MAX_BATCH_CHARS):
+    """Group filtered files into review batches bounded by total patch size.
+
+    Large PRs are reviewed in several passes rather than one giant prompt
+    (task 00011): files are packed greedily, in their given order, into batches
+    whose combined patch length stays within `max_batch_chars`. A file whose
+    own patch already exceeds the budget still gets its own (over-budget) batch
+    instead of being dropped — filter_files has already capped any single patch
+    at DEFAULT_MAX_PATCH_CHARS, so each pass stays bounded.
+
+    Returns a list of file-lists. An empty input yields a single empty batch,
+    so the caller still emits one "no reviewable files" review.
+    """
+    batches = []
+    current = []
+    current_chars = 0
+    for f in files:
+        size = len(f.get("patch") or "")
+        if current and current_chars + size > max_batch_chars:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(f)
+        current_chars += size
+    batches.append(current)  # always emit the last (possibly empty) batch
+    return batches
+
+
+def build_review_prompt(categories, files, conventions="", part=None):
     """Assemble the LLM review prompt from enabled categories and file diffs.
 
     The prompt is fully specified (task 00012): it lists the review
     categories, optional per-repo `conventions`, a defined severity scale, and
     a fixed output format, so reviews are consistent and machine-skimmable.
+
+    `part` is an optional ``(index, count)`` for large PRs reviewed in several
+    passes (task 00011); when ``count > 1`` the prompt states which part this
+    is so the model scopes its review to the files shown instead of flagging
+    the split-off files as missing.
     """
     lines = [
         "You are a senior code reviewer. Review the pull request diff below.",
         'Evaluate the changes ONLY against the categories under "Review categories".',
         "",
-        "# Review categories",
     ]
+    if part is not None:
+        index, count = part
+        if count > 1:
+            lines.append(
+                f"This is review part {index} of {count} for a large pull request; "
+                "review only the diff below and scope every finding to these files."
+            )
+            lines.append("")
+    lines.append("# Review categories")
     for c in categories:
         lines.append("## " + c["name"])
         lines.append(c["prompt"])
