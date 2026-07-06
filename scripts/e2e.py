@@ -387,7 +387,38 @@ def setup_n8n(
         # Scrub the secret-bearing file inside the container. Must be root: the
         # files are root-owned and /tmp is sticky, so `node` cannot delete them.
         run(["docker", "exec", "-u", "root", N8N_CONTAINER, "rm", "-f", *remote_files], check=False)
-    print(f"setup: {len(creds)} credential(s) imported, workflow wired and activated.")
+    # CLI `update:workflow --active=true` flips the DB flag but the running n8n
+    # process does NOT register the production webhook until it restarts, so
+    # POSTs to /webhook/pr-review 404 until then. Restart so the webhook goes live.
+    restart_n8n()
+    print(f"setup: {len(creds)} credential(s) imported, workflow wired, activated (n8n restarted).")
+
+
+def restart_n8n() -> None:
+    """Restart n8n and wait until the production webhook is actually live.
+
+    The REST API answers a moment before the webhook is registered, so waiting
+    on ``/rest/settings`` alone races. Instead poll the webhook path with a
+    harmless ``{}`` POST (it short-circuits at the skip gate) until it stops
+    404-ing — that is the real signal the activated workflow is serving.
+    """
+    run(["docker", "restart", N8N_CONTAINER])
+    url = webhook_url(LOCAL_BASE)
+    for _ in range(90):
+        req = urllib.request.Request(
+            url, data=b"{}", method="POST", headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status != 404:
+                    return
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                return  # any non-404 response means the webhook is registered
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(1)
+    sys.exit("setup: n8n webhook did not come up after restart.")
 
 
 def cmd_setup(args: argparse.Namespace) -> int:

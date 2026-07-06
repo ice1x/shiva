@@ -453,14 +453,14 @@ end-to-end test (task `00008`).
 Ordered by priority (highest first). Check off as you go.
 
 - [x] `00001` — Run n8n locally (Docker or `npx n8n`) and open the editor UI — see [Run n8n locally](#run-n8n-locally)
-- [ ] `00002` — Create a GitHub personal access token and add it as a credential in n8n
-- [ ] `00003` — Add a Webhook / GitHub Trigger node and receive a real `pull_request opened` event from a pet project repo
-- [ ] `00004` — Add an HTTP Request node to fetch changed files/diff from `GET /repos/{owner}/{repo}/pulls/{number}/files`
-- [ ] `00005` — Add a Code node: filter target files (e.g. `.py` only), skip oversized diffs, concatenate into a single prompt-ready string
-- [ ] `00006` — Add an LLM node (or HTTP Request to the API) with a review prompt assembled from the enabled [review categories](#review-categories)
-- [ ] `00007` — Add a GitHub node to post the LLM output as a comment on the PR
-- [ ] `00008` — End-to-end test: open a PR with intentionally flawed code and verify the review comment appears
-- [ ] `00009` — Start using it: enable the workflow on 1–2 active pet project repos
+- [x] `00002` — Create a GitHub personal access token and add it as a credential in n8n — imported (encrypted) by [`scripts/e2e.py`](scripts/e2e.py) `setup`, token from the environment (never stored)
+- [x] `00003` — Add a Webhook / GitHub Trigger node and receive a real `pull_request opened` event from a pet project repo — Webhook node at `/webhook/pr-review`; real deliveries verified via [`scripts/dev_tunnel.sh`](scripts/dev_tunnel.sh)
+- [x] `00004` — Add an HTTP Request node to fetch changed files/diff from `GET /repos/{owner}/{repo}/pulls/{number}/files` — `Fetch PR Files` node
+- [x] `00005` — Add a Code node: filter target files (e.g. `.py` only), skip oversized diffs, concatenate into a single prompt-ready string — `Filter Diff & Build Prompt` (Python) from [`review.py`](src/shiva_agent/review.py)
+- [x] `00006` — Add an LLM node (or HTTP Request to the API) with a review prompt assembled from the enabled [review categories](#review-categories) — `LLM Review` node (vendor-agnostic provider)
+- [x] `00007` — Add a GitHub node to post the LLM output as a comment on the PR — `Post PR Comment` node
+- [x] `00008` — End-to-end test: open a PR with intentionally flawed code and verify the review comment appears — automated by [`scripts/e2e.py`](scripts/e2e.py) `live`; verified on `ice1x/graphbook` and `ice1x/antigram`
+- [x] `00009` — Start using it: enable the workflow on 1–2 active pet project repos — webhooks active on `ice1x/graphbook` and `ice1x/antigram`, each confirmed with a live review comment
 - [x] `00010` — Add an IF node to skip draft PRs and PRs labeled `skip-review`
 - [x] `00011` — Handle large PRs: the diff is packed into size-bounded batches (`split_files_into_batches`, budget `DEFAULT_MAX_BATCH_CHARS`) and the Code node emits one item per batch, so n8n reviews a big PR in several passes (one Claude call + one comment per batch) — see [Large PRs](#large-prs)
 - [x] `00012` — Tune the review prompt: a defined severity scale (blocker/high/medium/low), a fixed output format (Summary / Verdict / ordered Findings), and per-repo `conventions` injected from `.shiva.yml` — see [Per-repo configuration](#per-repo-configuration)
@@ -475,4 +475,13 @@ Ordered by priority (highest first). Check off as you go.
 
 ## Definition of Done (MVP)
 
-Items `00001`–`00009` are checked: a PR opened in a pet project repo automatically receives an LLM review comment without manual steps.
+**Met.** Items `00001`–`00009` are checked: a PR opened in a pet project repo
+automatically receives an LLM review comment without manual steps. Verified
+end-to-end on `ice1x/graphbook` and `ice1x/antigram` (a throwaway PR with
+intentionally flawed code drew an automatic review comment) using the free,
+local, keyless default provider — no vendor key required.
+
+The one operator step that stays manual is exposing localhost to GitHub: run
+[`scripts/dev_tunnel.sh`](#expose-n8n-for-webhooks-dev-tunnel) and keep it up
+while reviewing. Everything else — credentials, workflow import/activation,
+webhook registration — is scripted by [`scripts/e2e.py`](scripts/e2e.py).
