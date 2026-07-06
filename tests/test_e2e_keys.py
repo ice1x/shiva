@@ -62,11 +62,12 @@ def test_empty_when_nothing_set():
     assert resolve_llm_token() == ""
 
 
-def test_resolve_provider_reads_config_mapping():
-    # shiva.config.yml maps ice1x/graphbook → openai.
-    assert resolve_llm_provider("ice1x/graphbook") == "openai"
-    # An unmapped repo falls back to the default provider (ollama).
-    assert resolve_llm_provider("ice1x/unmapped") == "ollama"
+def test_resolve_provider_reads_config_default():
+    # The committed config ships an empty llm_by_repo (keyless out of the box),
+    # so every repo resolves to the default provider. Mapping precedence itself
+    # is covered by test_llm_mapping with synthetic configs.
+    assert resolve_llm_provider("ice1x/graphbook") == "ollama"
+    assert resolve_llm_provider("ice1x/anything") == "ollama"
 
 
 # --- mapped_providers (pure, hosted + local) ------------------------------
