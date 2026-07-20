@@ -1,0 +1,65 @@
+name: "Shiva PR Review"
+description: "Review a pull request with a configurable LLM and post the findings as a comment."
+author: "ice1x"
+
+branding:
+  icon: "eye"
+  color: "purple"
+
+inputs:
+  llm-api-key:
+    description: "API key for the LLM provider resolved from .shiva.yml (omit only for a keyless provider)."
+    required: false
+    default: ""
+  github-token:
+    description: "Token used to read the diff and post the comment. The default GITHUB_TOKEN is enough."
+    required: false
+    default: ${{ github.token }}
+  config:
+    description: "Path to the default config. Defaults to the shiva.config.yml shipped with this action."
+    required: false
+    default: ""
+  python-version:
+    description: "Python used to run the review."
+    required: false
+    default: "3.12"
+  dry-run:
+    description: "Log the planned requests and post nothing."
+    required: false
+    default: "false"
+
+outputs:
+  result:
+    description: "One-line summary of the run (files reviewed, comments posted)."
+    value: ${{ steps.review.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install the review agent
+      shell: bash
+      run: pip install --quiet "$GITHUB_ACTION_PATH"
+
+    - name: Review the pull request
+      id: review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        SHIVA_LLM_API_KEY: ${{ inputs.llm-api-key }}
+      run: |
+        set -euo pipefail
+        config="${{ inputs.config }}"
+        if [ -z "$config" ]; then
+          config="$GITHUB_ACTION_PATH/shiva.config.yml"
+        fi
+        args=(--repo "$GITHUB_REPOSITORY" --workspace "$GITHUB_WORKSPACE" --config "$config")
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          args+=(--dry-run)
+        fi
+        python "$GITHUB_ACTION_PATH/scripts/review_pr.py" "${args[@]}" | tee shiva-review.log
+        echo "result=$(tail -n 1 shiva-review.log)" >> "$GITHUB_OUTPUT"

@@ -4,8 +4,9 @@ n8n gave this project a fast, visual MVP with built-in webhook handling,
 credential storage, and execution logs. But the actual pipeline is small — a
 webhook receiver plus seven nodes, and the real logic already lives in
 unit-tested Python (`src/shiva_agent/review.py`). n8n is heavier than this needs.
-This note sketches where the runtime could move; it is a sketch, not a committed
-migration.
+**Option B below is now implemented** — see [github-action.md](github-action.md).
+This note is kept as the reasoning that led there, and as the map of what is
+left of n8n.
 
 ## What n8n does here (and what would replace it)
 
@@ -29,7 +30,7 @@ a VPS / container host. Removes the n8n containers and the Python-runner sandbox
 (so `match_glob` could go back to `fnmatch`), but still needs a public host and
 webhook management.
 
-**B. A GitHub Action (recommended for this use case).** A workflow in each target
+**B. A GitHub Action (implemented — this is the default runtime now).** A workflow in each target
 repo (`.github/workflows/shiva-review.yml`) triggered on `pull_request`, running
 `review.py` on GitHub's runners and posting the comment via `GITHUB_TOKEN` or a
 bot token. This removes n8n **and** the tunnel **and** the dependency on the

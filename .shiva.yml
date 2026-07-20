@@ -1,0 +1,18 @@
+# Shiva's own review policy — the per-repo override this repo ships, and a
+# worked example of the format a target repository copies.
+#
+# The shipped default provider is a free, local, keyless Ollama, which is right
+# for a laptop-run n8n and unreachable from a GitHub runner. Running as a GitHub
+# Action therefore needs a hosted provider plus the SHIVA_LLM_API_KEY secret.
+llm:
+  provider: openai
+  model: gpt-4o-mini
+
+conventions: |
+  The review logic is pure and import-free on purpose: parts of review.py are
+  embedded into an n8n Python Code node whose sandbox rejects every stdlib
+  import. Do not suggest adding imports (re, fnmatch, dataclasses, typing) to
+  functions that build_workflow.py embeds.
+  I/O lives in scripts/, decisions live in src/shiva_agent/ — do not suggest
+  moving network calls into the pure modules.
+  Every change ships with tests; the suite must stay runnable without network.

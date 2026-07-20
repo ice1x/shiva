@@ -814,6 +814,12 @@ def build_review_prompt(categories, files, conventions="", part=None):
         "file means you did not locate the real code — re-check or drop it."
     )
     lines.append(
+        "- Write a location as `path:line` or `path:start-end` with start <= end "
+        "(e.g. `src/app.py:214`, `src/app.py:214-220`) — never `path:lines 63-29`, "
+        "never a symbol name in place of a number. A line number that is not in the "
+        "diff is stripped before the review is posted, so a guess buys you nothing."
+    )
+    lines.append(
         "- Do NOT report a check, field, validation, or handler as missing or absent "
         "unless its absence is visible in the shown diff; quote the line whose absence "
         "you assert. If it may exist in code not shown, do not claim it is missing."
@@ -902,6 +908,180 @@ def extract_review_text(response, api):
     if not choices:
         return ""
     return ((choices[0] or {}).get("message") or {}).get("content") or ""
+
+
+CODE_FENCE = "```"
+# Characters a model wraps a path in: backticks, quotes, brackets, punctuation.
+ANCHOR_TRIM = "`'\"*()[]{}<>,;.!?"
+
+
+def strip_outer_code_fence(text):
+    """Unwrap a fenced block that encloses the whole review.
+
+    Models sometimes answer with the entire review inside a ```markdown fence;
+    posted verbatim, GitHub renders the review as one grey code block instead of
+    a formatted review (seen on ice1x/graphbook PR #92). Only a fence that opens
+    on the first line and closes on the last is removed, and only when the fences
+    *inside* it balance — so a review that legitimately consists of two sibling
+    code blocks, or contains a nested snippet, is left alone.
+    """
+    if text is None:
+        return ""
+    stripped = text.strip()
+    if not stripped.startswith(CODE_FENCE):
+        return text
+    lines = stripped.split("\n")
+    if len(lines) < 2 or lines[-1].strip() != CODE_FENCE:
+        return text
+    # An opening fence carries at most a bare language tag ("```markdown").
+    if " " in lines[0].strip()[len(CODE_FENCE) :]:
+        return text
+    # Walk the inner fences: a tagged fence ("```python") opens a nested block, a
+    # bare one closes it. If the nesting ever unwinds past the outer fence, the
+    # first line was not a wrapper but the first of several sibling blocks.
+    inner = lines[1:-1]
+    depth = 1
+    for line in inner:
+        line = line.strip()
+        if not line.startswith(CODE_FENCE):
+            continue
+        depth += 1 if line[len(CODE_FENCE) :] else -1
+        if depth < 1:
+            return text
+    if depth != 1:
+        return text
+    return "\n".join(inner)
+
+
+def patch_new_lines(patch):
+    """Return the set of new-file line numbers a unified diff patch covers.
+
+    Added (`+`) and context (` `) lines exist in the new file and can be cited by
+    a finding; removed (`-`) lines cannot. Line numbering follows each hunk
+    header's `+start[,count]`.
+    """
+    covered = set()
+    if not patch:
+        return covered
+    line_no = 0
+    in_hunk = False
+    for line in patch.split("\n"):
+        if line.startswith("@@"):
+            in_hunk = False
+            for token in line[2:].split("@@")[0].split():
+                if token.startswith("+"):
+                    start = token[1:].split(",")[0]
+                    if start.isdigit():
+                        line_no = int(start)
+                        in_hunk = True
+            continue
+        if not in_hunk or not line:
+            continue
+        if line[0] == "-" or line[0] == "\\":  # removed, or "\ No newline at EOF"
+            continue
+        covered.add(line_no)
+        line_no += 1
+    return covered
+
+
+def diff_line_index(files):
+    """Map each reviewed file's path to the new-file lines its patch covers."""
+    return {f.get("filename", ""): patch_new_lines(f.get("patch")) for f in files or []}
+
+
+LINE_WORDS = ("line", "lines", "l")
+
+
+def _looks_like_line_ref(ref):
+    """Whether `ref` is an attempt at a line citation (digits, maybe a range)."""
+    return bool(ref) and any(c.isdigit() for c in ref) and all(c.isdigit() or c == "-" for c in ref)
+
+
+def _parse_line_ref(ref):
+    """Parse `12` or `12-15` into a list of cited numbers, or None if it is not one.
+
+    A reversed range (`22-20`) is rejected outright: the lines may exist, but a
+    backwards citation means the model is guessing rather than reading.
+    """
+    parts = ref.split("-")
+    if len(parts) > 2 or not all(p.isdigit() for p in parts if p != ""):
+        return None
+    if not parts or any(p == "" for p in parts):
+        return None
+    numbers = [int(p) for p in parts]
+    if len(numbers) == 2 and numbers[0] > numbers[1]:
+        return None
+    return numbers
+
+
+def _split_anchor(token, next_token=None):
+    """Split a `path:lines` citation into (path, [numbers], consumed_next).
+
+    Handles both shapes real models produce: `app.ts:214` and `app.ts:lines
+    63-29`, where the numbers spill into the following token. Returns
+    ``(None, None, False)`` for anything that is not a citation — prose ending in
+    a colon, clock times (`00:30`), bare numbers — since the path part must look
+    like a path.
+    """
+    if ":" not in token:
+        return None, None, False
+    path, _, ref = token.rpartition(":")
+    if not path or path.isdigit() or ("/" not in path and "." not in path):
+        return None, None, False
+    if ref.lower() in LINE_WORDS:
+        # "app.ts:lines 63-29" — the numbers spill into the next token. A bare
+        # "app.ts:lines", or one followed by a nonsense range, cites nothing: an
+        # empty citation list marks the anchor for removal, and the spilled-over
+        # token goes with it.
+        following = next_token or ""
+        return path, _parse_line_ref(following) or [], _looks_like_line_ref(following)
+    if not _looks_like_line_ref(ref):
+        return None, None, False  # not a citation at all — leave the prose alone
+    return path, _parse_line_ref(ref) or [], False
+
+
+def sanitize_review(text, files=None):
+    """Clean a raw LLM review so it can be posted verbatim as a PR comment.
+
+    Unwraps a fence around the whole answer, then drops invented line anchors:
+    a finding citing `path:line` keeps its number only if that line really is in
+    the reviewed diff, otherwise the number is stripped and the path kept — a
+    finding pointing at the right file is still useful, one pointing at a line
+    that does not exist destroys trust in the whole review.
+
+    `files` is the batch of GitHub file objects that was reviewed. Without it
+    only the impossible `:0` anchor is dropped, since nothing can be verified.
+    """
+    text = strip_outer_code_fence(text)
+    if not text:
+        return ""
+    index = diff_line_index(files) if files else None
+    out = []
+    for line in text.split("\n"):
+        tokens = line.split(" ")
+        dropped = set()
+        for i, token in enumerate(tokens):
+            core = token.strip(ANCHOR_TRIM)
+            if not core:
+                continue
+            following = tokens[i + 1].strip(ANCHOR_TRIM) if i + 1 < len(tokens) else None
+            path, cited, spills_over = _split_anchor(core, following)
+            if path is None:
+                continue
+            if not cited:
+                keep = False  # "app.ts:lines" with no numbers cites nothing
+            elif index is None:
+                keep = 0 not in cited
+            elif path in index:
+                keep = all(n in index[path] for n in cited)
+            else:
+                keep = 0 not in cited  # unreviewed path: only :0 is impossible
+            if not keep:
+                tokens[i] = token.replace(core, path, 1)
+                if spills_over:
+                    dropped.add(i + 1)  # the numbers belonged to the anchor
+        out.append(" ".join(t for j, t in enumerate(tokens) if j not in dropped))
+    return "\n".join(out)
 
 
 def review_has_action_items(text):
