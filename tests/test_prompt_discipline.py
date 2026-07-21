@@ -43,3 +43,14 @@ def test_prompt_flags_zero_or_one_line_anchors():
 
 def test_prompt_forbids_library_framework_swaps():
     assert "swapping" in _prompt() and "test framework" in _prompt()
+
+
+def test_the_prompt_pins_the_location_format():
+    prompt = _prompt()
+    assert "`path:line`" in prompt
+    assert "start <= end" in prompt
+
+
+def test_the_prompt_says_bad_anchors_are_stripped():
+    # The model is told the post-processing exists, so guessing has no upside.
+    assert "stripped before the review is posted" in _prompt()
