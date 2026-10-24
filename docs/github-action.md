@@ -1,8 +1,7 @@
 # Running Shiva as a GitHub Action
 
 The review runs on GitHub's runners, triggered by the target repository's own
-`pull_request` event. No tunnel, no n8n, no always-on machine — which is the one
-operational weakness the [n8n runtime](n8n.md) never solved.
+`pull_request` event. No tunnel, no server, no always-on machine.
 
 ## Add it to a repository
 
@@ -51,15 +50,16 @@ That is the whole setup. The next pull request gets reviewed.
 ## Pick a provider a runner can reach
 
 The shipped default is a **local, keyless Ollama** — free, and correct for a
-laptop-run n8n. A GitHub runner cannot reach it: nothing listens on that
+local CLI run. A GitHub runner cannot reach it: nothing listens on that
 machine's localhost. The run therefore fails fast with an explicit message
 rather than a confusing connection error:
 
 ```
-error: llm provider 'ollama' points at 'http://host.docker.internal:11434/...',
-which a GitHub runner cannot reach — it is local to the machine running n8n.
+error: llm provider 'ollama' points at 'http://localhost:11434/...',
+which a GitHub runner cannot reach — it is local to the operator's machine.
 Set a hosted provider in .shiva.yml (llm.provider: openai | deepseek |
-anthropic | openrouter) and pass its key as SHIVA_LLM_API_KEY.
+anthropic | openrouter) and pass its key as SHIVA_LLM_API_KEY, or run the
+reviewer locally (scripts/review_pr.py) where the local model is reachable.
 ```
 
 So a repo reviewed by the Action names a hosted provider:

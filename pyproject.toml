@@ -1,7 +1,7 @@
 [project]
 name = "shiva-agent"
 version = "0.1.0"
-description = "PR review agent logic and n8n workflow generator"
+description = "Configurable LLM code reviewer for pull requests"
 requires-python = ">=3.10"
 dependencies = ["PyYAML>=6"]
 

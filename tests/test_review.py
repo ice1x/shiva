@@ -12,6 +12,7 @@ from shiva_agent.review import (
     ConfigError,
     build_agent_system_prompt,
     build_review_prompt,
+    extract_review_text,
     filter_files,
     load_enabled_categories,
     merge_config,
@@ -611,7 +612,7 @@ class TestBuildAgentSystemPrompt:
 
 class TestFetchFileToolMetadata:
     def test_tool_name_is_a_bare_identifier(self):
-        # used verbatim as the n8n tool node name and referenced in the prompt
+        # a bare identifier the model references in the prompt
         assert FETCH_FILE_TOOL_NAME == FETCH_FILE_TOOL_NAME.strip()
         assert " " not in FETCH_FILE_TOOL_NAME
 
@@ -631,7 +632,7 @@ class TestResolveLlm:
         assert llm["api"] == "openai"
         assert llm["auth"] == "none"  # free, no API key
         assert "11434" in llm["endpoint"]
-        assert llm["model"] == "llama3.2"
+        assert llm["model"] == "qwen2.5-coder:14b"
 
     def test_none_config_uses_the_default(self):
         assert resolve_llm(None)["provider"] == "ollama"
@@ -644,7 +645,7 @@ class TestResolveLlm:
     @pytest.mark.parametrize(
         "provider,endpoint_has,model,auth",
         [
-            ("ollama", "11434", "llama3.2", "none"),
+            ("ollama", "11434", "qwen2.5-coder:14b", "none"),
             ("lmstudio", "1234", "local-model", "none"),
             ("vllm", "8000", "local-model", "none"),
             ("openrouter", "openrouter.ai", "meta-llama/llama-3.1-8b-instruct:free", "bearer"),
@@ -775,16 +776,18 @@ class TestLlmApiInterface:
             body = api.request_body("m")
             assert PROMPT_SENTINEL in str(body)
 
-    def test_openai_reads_choices_message_content(self):
-        assert "choices[0].message.content" in LLM_APIS["openai"].comment_body_expr()
+    def test_openai_review_text_is_read_from_choices_message_content(self):
+        response = {"choices": [{"message": {"content": "the review"}}]}
+        assert extract_review_text(response, "openai") == "the review"
 
-    def test_anthropic_reads_content_text_blocks(self):
-        assert "$json.content" in LLM_APIS["anthropic"].comment_body_expr()
+    def test_anthropic_review_text_is_joined_from_text_blocks(self):
+        response = {"content": [
+            {"type": "text", "text": "a"},
+            {"type": "thinking", "text": "ignored"},
+            {"type": "text", "text": "b"},
+        ]}
+        assert extract_review_text(response, "anthropic") == "ab"
 
-    def test_agent_chat_node_type_per_family(self):
-        assert "lmChatOpenAi" in LLM_APIS["openai"].agent_chat_node("m", "http://h/v1/chat/completions")["type"]
-        assert "lmChatAnthropic" in LLM_APIS["anthropic"].agent_chat_node("m", "x")["type"]
-
-    def test_openai_agent_node_derives_base_url(self):
-        node = LLM_APIS["openai"].agent_chat_node("m", "https://api.deepseek.com/v1/chat/completions")
-        assert node["parameters"]["options"]["baseURL"] == "https://api.deepseek.com/v1"
+    def test_an_unexpected_response_shape_yields_empty_string(self):
+        assert extract_review_text({}, "openai") == ""
+        assert extract_review_text(None, "anthropic") == ""

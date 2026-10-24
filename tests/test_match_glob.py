@@ -1,8 +1,8 @@
 """Parity + behaviour tests for review.match_glob.
 
-match_glob is a stdlib-free reimplementation of fnmatch (the n8n Python runner
-sandbox forbids importing fnmatch/re). These tests pin it to the real
-`fnmatch.fnmatchcase` so it cannot silently drift from fnmatch semantics.
+match_glob is a thin wrapper over `fnmatch.fnmatchcase`. These tests pin it to
+the real `fnmatch.fnmatchcase` so the exclude-glob behaviour stays exactly
+fnmatch's, case-sensitive, even if the wrapper is ever reimplemented.
 """
 
 from fnmatch import fnmatchcase
