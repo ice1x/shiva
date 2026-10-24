@@ -90,13 +90,21 @@ def comment_request(repo, number, body, token):
     }
 
 
-def require_runner_reachable(llm):
+def require_runner_reachable(llm, on_runner=True):
     """Fail early when the resolved provider only exists on the operator's machine.
 
-    The keyless local default (Ollama) is right for a laptop-run n8n and wrong on
-    a GitHub runner, where nothing listens on localhost. Catching it here turns a
-    confusing connection-refused deep in the run into one actionable message.
+    The keyless local default (Ollama) is right for a laptop-run reviewer and
+    wrong on a GitHub runner, where nothing listens on localhost. Catching it
+    here turns a confusing connection-refused deep in the run into one actionable
+    message.
+
+    `on_runner` says whether this process is a GitHub Actions runner (the caller
+    decides, from `GITHUB_ACTIONS`). Off a runner — a developer running the
+    reviewer on their own machine — a laptop-local model *is* reachable, so the
+    guard does not fire and a local provider is allowed.
     """
+    if not on_runner:
+        return None
     endpoint = llm.get("endpoint") or ""
     host = endpoint.split("//", 1)[-1].split("/", 1)[0].split(":")[0]
     if host in LOCAL_HOSTS:
@@ -213,6 +221,7 @@ def run_review(
     exclude_globs=None,
     max_patch_chars=DEFAULT_MAX_PATCH_CHARS,
     max_batch_chars=DEFAULT_MAX_BATCH_CHARS,
+    on_runner=True,
 ):
     """Review one pull request end to end and post the findings.
 
@@ -229,7 +238,7 @@ def run_review(
     if should_skip_event(event):
         return {"skipped": True, "reviewed_files": 0, "comments_posted": 0}
 
-    require_runner_reachable(llm)  # fail before spending a single request
+    require_runner_reachable(llm, on_runner=on_runner)  # fail before spending a single request
     number = pull_request_from_event(event)["number"]
 
     files = fetch_pr_files(repo, number, github_token, send)

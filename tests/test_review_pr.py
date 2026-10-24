@@ -130,7 +130,7 @@ def test_a_missing_repo_exits_nonzero(capsys, config_file, tmp_path, monkeypatch
     assert "--repo" in capsys.readouterr().err
 
 
-def test_a_local_only_provider_exits_nonzero_with_guidance(
+def test_a_local_only_provider_exits_nonzero_with_guidance_on_a_runner(
     capsys, tmp_path, monkeypatch
 ):
     config = {
@@ -140,6 +140,7 @@ def test_a_local_only_provider_exits_nonzero_with_guidance(
     path = tmp_path / "shiva.config.yml"
     path.write_text(yaml.safe_dump(config))
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_x")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")  # a real Actions runner
     code = review_pr.main(
         ["--repo", "ice1x/graphbook", "--pr", "1", "--config", str(path),
          "--workspace", str(tmp_path)]
@@ -148,6 +149,31 @@ def test_a_local_only_provider_exits_nonzero_with_guidance(
     err = capsys.readouterr().err
     assert "runner cannot reach" in err
     assert "SHIVA_LLM_API_KEY" in err
+
+
+def test_a_local_provider_is_allowed_off_a_runner(capsys, tmp_path, monkeypatch):
+    # The reviewer run by hand on a developer's machine (no GITHUB_ACTIONS) can
+    # reach a laptop-local model, so a local provider must not be rejected. With
+    # no PR files to review the run simply completes cleanly.
+    config = {
+        "categories": [{"id": "logical", "name": "L", "prompt": "p", "enabled": True}],
+        "llm": {
+            "provider": "ollama",
+            "model": "qwen2.5-coder:14b",
+            "endpoint": "http://localhost:11434/v1/chat/completions",
+        },
+    }
+    path = tmp_path / "shiva.config.yml"
+    path.write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_x")
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)  # not on a runner
+    monkeypatch.setattr(review_pr, "http_send", lambda spec: [])  # no PR files
+    code = review_pr.main(
+        ["--repo", "ice1x/graphbook", "--pr", "1", "--config", str(path),
+         "--workspace", str(tmp_path)]
+    )
+    assert code == 0
+    assert "runner cannot reach" not in capsys.readouterr().err
 
 
 # --- what a dry run does and does not do ------------------------------------

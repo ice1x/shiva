@@ -137,6 +137,15 @@ def test_a_hosted_endpoint_is_accepted():
     assert require_runner_reachable(OPENAI_LLM) is None
 
 
+def test_a_local_endpoint_is_allowed_off_a_runner():
+    # Running the reviewer on the operator's own machine (not a GitHub runner)
+    # is exactly when a laptop-local model *is* reachable, so the guard must not
+    # fire. `on_runner=False` says "nothing to protect against here".
+    local = dict(OPENAI_LLM, provider="ollama",
+                 endpoint="http://localhost:11434/v1/chat/completions")
+    assert require_runner_reachable(local, on_runner=False) is None
+
+
 # --- planning the review passes ---------------------------------------------
 
 CATEGORIES = [{"id": "logical", "name": "Logical Review", "prompt": "Check the logic."}]
