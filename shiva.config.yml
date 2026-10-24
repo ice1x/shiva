@@ -43,26 +43,23 @@ version: 1
 #     model: my-model
 #     auth: bearer
 #
-# Credentials are attached in the n8n UI on the 'LLM Review' node (task 00002):
-# 'Authorization: Bearer <key>' for OpenAI/DeepSeek/Qwen/OpenRouter,
-# 'x-api-key: <key>' for Anthropic; the local providers need none.
-#
-# NOTE: the local endpoints use host.docker.internal so the dockerised n8n can
-# reach a model server on the host (see docker-compose.yml). A natively-run n8n
-# should override `endpoint` to use localhost.
+# A hosted provider needs its API key passed as SHIVA_LLM_API_KEY; the local
+# providers (ollama, lmstudio, vllm) need none. The reviewer attaches the right
+# header itself (Bearer for OpenAI/DeepSeek/Qwen/OpenRouter, x-api-key for
+# Anthropic). The local endpoints default to localhost — the reviewer runs
+# natively, so it reaches a model server on the same host directly.
 llm:
   provider: ollama            # DEFAULT for every repo not listed below
   model: qwen2.5-coder:14b    # locally-served Qwen (Ollama); free, no API key
-  endpoint: http://localhost:11434/v1/chat/completions  # native run, not docker
+  endpoint: http://localhost:11434/v1/chat/completions
   temperature: 0              # 0 = deterministic, terse, on-topic (0–2)
 
 # Per-repo model mapping. Each key is a GitHub "owner/repo"; its block has the
 # same fields as `llm` above (provider / model / temperature / endpoint / auth).
 # A repo listed here uses its own model; any repo NOT listed uses the default
-# `llm` (ollama) above. A hosted provider needs its API key in .env (e.g.
-# $SHIVA_OPENAI_API_KEY) — `e2e.py check` fails until every mapped hosted
-# provider has one. Because n8n bakes the provider into the workflow, build each
-# listed repo's workflow with `build_workflow.py --repo owner/name`.
+# `llm` (ollama) above. A hosted provider needs its API key in the environment
+# (SHIVA_LLM_API_KEY). The config is read fresh on every run — nothing to
+# rebuild when a mapping changes.
 llm_by_repo:
   # Empty on purpose: every repo now inherits the local Qwen default above, so
   # reviews run on the local model for free with no per-repo wiring. Pin a repo

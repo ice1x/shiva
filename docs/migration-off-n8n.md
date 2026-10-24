@@ -1,5 +1,10 @@
 # Migrating off n8n (design sketch)
 
+> **Status: done (task `00023`).** n8n has been removed entirely — the GitHub
+> Action / CLI path is the only runtime now. The n8n containers, the workflow
+> generator, the webhook tunnel, and the e2e driver are gone. This note is kept
+> as the reasoning that led there.
+
 n8n gave this project a fast, visual MVP with built-in webhook handling,
 credential storage, and execution logs. But the actual pipeline is small — a
 webhook receiver plus seven nodes, and the real logic already lives in

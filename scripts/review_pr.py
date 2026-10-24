@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Review a pull request from a GitHub Actions runner — the n8n-free runtime.
+"""Review a pull request — the runtime behind both the GitHub Action and local runs.
 
 This is the thin I/O shell around `shiva_agent.action.run_review`: it resolves
 the config (defaults + the target repo's `.shiva.yml`), reads the event payload

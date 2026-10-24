@@ -6,8 +6,8 @@ Shiva reviews a pull request against **categories you choose**, under **house
 rules the repository states**, with **whatever model that repository already
 pays for** (or a free local one), and posts the findings as one PR comment.
 
-It runs as a GitHub Action — no server, no tunnel, no always-on machine. The
-original n8n runtime still works and is documented in [docs/n8n.md](docs/n8n.md).
+It runs as a GitHub Action — no server, no tunnel, no always-on machine — or
+locally from the command line with [`scripts/review_pr.py`](scripts/review_pr.py).
 
 ## Quickstart
 
@@ -126,10 +126,8 @@ turns every category off is rejected (`error: invalid config in .shiva.yml: no
 review categories are enabled ...`) rather than silently producing a reviewer
 whose prompt has an empty "Review categories" section and nothing to check.
 
-Running as a GitHub Action, the override is read **from the checkout on every
-run**, so a repo changes its review policy by editing `.shiva.yml` — nothing to
-rebuild. (Under the n8n runtime the config is baked in at build time instead;
-see [docs/n8n.md](docs/n8n.md).)
+The override is read **from the checkout on every run**, so a repo changes its
+review policy by editing `.shiva.yml` — nothing to rebuild.
 
 ## Excluded files
 
@@ -255,12 +253,10 @@ call and one comment per pass.
 
 ```
 src/shiva_agent/review.py    review policy: config merge, filtering, batching,
-                             prompt assembly, output sanitizing (pure, no imports —
-                             parts of it are embedded into an n8n Python sandbox)
+                             prompt assembly, output sanitizing (pure, no I/O)
 src/shiva_agent/action.py    the runtime: gate → fetch → review → post, with HTTP
                              injected, so the whole path is unit-tested offline
-scripts/review_pr.py         the I/O shell (urllib) the Action runs
-scripts/build_workflow.py    generates the n8n workflow JSON from the same logic
+scripts/review_pr.py         the I/O shell (urllib) the Action and the CLI run
 ```
 
 Decisions live in pure modules, I/O lives in `scripts/`. `pytest` runs the whole
@@ -276,9 +272,8 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 | Document | What is in it |
 |---|---|
 | [docs/github-action.md](docs/github-action.md) | Running it on GitHub Actions: inputs, providers, cost, dry runs |
-| [docs/n8n.md](docs/n8n.md) | The original n8n runtime: local setup, tunnel, scripted end-to-end run |
 | [docs/improving-reviews.md](docs/improving-reviews.md) | Logging verdicts on findings and turning them into prompt rules |
-| [docs/migration-off-n8n.md](docs/migration-off-n8n.md) | Why the runtime moved, and what is left of n8n |
+| [docs/migration-off-n8n.md](docs/migration-off-n8n.md) | Why the runtime moved off n8n (now fully removed) |
 | [docs/roadmap.md](docs/roadmap.md) | Delivery log and what is next |
 
 ## Status

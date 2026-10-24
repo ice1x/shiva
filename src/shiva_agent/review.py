@@ -1,9 +1,10 @@
 """Diff filtering and review-prompt assembly for the PR review agent.
 
-The bodies of `filter_files` and `build_review_prompt` are embedded verbatim
-into the n8n Code node by scripts/build_workflow.py, so they must stay
-dependency-free (standard library only) and self-contained.
+Pure, side-effect-free decision logic: what to review, what to send, what the
+prompt says. The I/O shell around it lives in `action.py` / `scripts/review_pr.py`.
 """
+
+from fnmatch import fnmatchcase
 
 DEFAULT_MAX_PATCH_CHARS = 15_000
 # Total patch budget per review pass (task 00011). A large PR is reviewed in
@@ -41,9 +42,8 @@ REVIEWABLE_ACTIONS = frozenset({"opened", "reopened", "ready_for_review", "synch
 # speaks an existing protocol = one row in `LLM_PROVIDERS` — or nothing at all:
 # a config block may define a provider inline (`api` + `endpoint` + `model`
 # [+ `auth`]), so any OpenAI-/Anthropic-compatible server works without a code
-# change. This layer is build-time only (never embedded in the n8n Code node),
-# so it is free to use classes.
-PROMPT_SENTINEL = "__SHIVA_PROMPT__"  # replaced with the n8n prompt expression at build time
+# change.
+PROMPT_SENTINEL = "__SHIVA_PROMPT__"  # placeholder in the request body, swapped for the real prompt in action.py
 MAX_OUTPUT_TOKENS = 16000
 # Sampling temperature for the review. Default 0 → deterministic, terse, on-topic
 # output (a review wants precision, not creativity). Overridable per repo via
@@ -51,7 +51,7 @@ MAX_OUTPUT_TOKENS = 16000
 # thinking, which is incompatible with a fixed temperature.
 DEFAULT_TEMPERATURE = 0
 # Sentinel the model returns (alone) when a PR has nothing worth acting on, so
-# the workflow posts NO comment — decided from the single review call, no extra
+# the reviewer posts NO comment — decided from the single review call, no extra
 # tokens. A real review (with findings) never equals this.
 NO_FINDINGS_SENTINEL = "APPROVED"
 
@@ -60,8 +60,9 @@ class LLMApi:
     """Interface for one LLM wire protocol — the vendor-agnostic seam.
 
     A concrete family describes, in provider-neutral terms, *how* to call the
-    API and *where* the review text lives in the response. `build_workflow`
-    turns that into the actual n8n nodes; nothing here knows about a vendor.
+    API and *where* the review text lives in the response; nothing here knows
+    about a vendor. `action.py` turns that into the actual HTTP request, and
+    `extract_review_text` reads the response back.
     """
 
     api = ""
@@ -70,17 +71,9 @@ class LLMApi:
         """Return the JSON request body, with PROMPT_SENTINEL where the prompt goes."""
         raise NotImplementedError
 
-    def comment_body_expr(self):
-        """Return the n8n expression that extracts the review text from the response."""
-        raise NotImplementedError
-
     def http_headers(self):
         """Return protocol-specific HTTP headers (auth is added separately)."""
         return [{"name": "content-type", "value": "application/json"}]
-
-    def agent_chat_node(self, model, endpoint):
-        """Return {type, typeVersion, parameters} for the agent variant's chat sub-node."""
-        raise NotImplementedError
 
 
 class AnthropicApi(LLMApi):
@@ -98,27 +91,11 @@ class AnthropicApi(LLMApi):
             "messages": [{"role": "user", "content": PROMPT_SENTINEL}],
         }
 
-    def comment_body_expr(self):
-        return (
-            "={{ JSON.stringify({ body: $json.content"
-            ".filter(b => b.type === 'text').map(b => b.text).join('\\n') }) }}"
-        )
-
     def http_headers(self):
         return [
             {"name": "anthropic-version", "value": "2023-06-01"},
             {"name": "content-type", "value": "application/json"},
         ]
-
-    def agent_chat_node(self, model, endpoint):
-        return {
-            "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
-            "typeVersion": 1.3,
-            "parameters": {
-                "model": {"__rl": True, "mode": "list", "value": model},
-                "options": {"maxTokensToSample": MAX_OUTPUT_TOKENS},
-            },
-        }
 
 
 class OpenAIApi(LLMApi):
@@ -133,20 +110,6 @@ class OpenAIApi(LLMApi):
             "max_tokens": MAX_OUTPUT_TOKENS,
             "temperature": temperature,
             "messages": [{"role": "user", "content": PROMPT_SENTINEL}],
-        }
-
-    def comment_body_expr(self):
-        return "={{ JSON.stringify({ body: $json.choices[0].message.content }) }}"
-
-    def agent_chat_node(self, model, endpoint):
-        base_url = endpoint.rsplit("/chat/completions", 1)[0]
-        return {
-            "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
-            "typeVersion": 1.2,
-            "parameters": {
-                "model": {"__rl": True, "mode": "list", "value": model},
-                "options": {"baseURL": base_url, "maxTokens": MAX_OUTPUT_TOKENS},
-            },
         }
 
 
@@ -164,26 +127,26 @@ AUTH_SCHEMES = {
 
 # Provider presets: endpoint + default model + auth for known vendors. Local,
 # free, keyless providers come first, and the default is one of them ON PURPOSE
-# so the out-of-the-box workflow costs nothing and locks in no vendor. The local
-# endpoints use `host.docker.internal` because n8n runs in a container (see
-# docker-compose.yml); a natively-run n8n should override `endpoint` to
-# `localhost`. `model`/`endpoint`/`auth` are all overridable per repo.
+# so the out-of-the-box review costs nothing and locks in no vendor. The local
+# endpoints use `localhost`: the reviewer runs natively (CLI / GitHub Action),
+# so it reaches a model server on the same host directly. `model`/`endpoint`/
+# `auth` are all overridable per repo.
 LLM_PROVIDERS = {
     "ollama": {
         "api": "openai",
-        "endpoint": "http://host.docker.internal:11434/v1/chat/completions",
-        "default_model": "llama3.2",
+        "endpoint": "http://localhost:11434/v1/chat/completions",
+        "default_model": "qwen2.5-coder:14b",
         "auth": "none",
     },
     "lmstudio": {
         "api": "openai",
-        "endpoint": "http://host.docker.internal:1234/v1/chat/completions",
+        "endpoint": "http://localhost:1234/v1/chat/completions",
         "default_model": "local-model",  # set llm.model to your loaded model id
         "auth": "none",
     },
     "vllm": {
         "api": "openai",
-        "endpoint": "http://host.docker.internal:8000/v1/chat/completions",
+        "endpoint": "http://localhost:8000/v1/chat/completions",
         "default_model": "local-model",  # set llm.model to the served model id
         "auth": "none",
     },
@@ -223,9 +186,9 @@ LLM_PROVIDERS = {
 DEFAULT_LLM_PROVIDER = "ollama"
 
 # Name of the tool the AI Agent variant exposes so the model can pull extra
-# repository files for context (task 00013). Referenced both in the agent's
-# system prompt (below) and as the generated n8n tool node's name, so the two
-# never drift.
+# repository files for context (task 00013). Referenced in the agent's system
+# prompt (below). NOTE: no runtime currently wires this agentic variant up — it
+# is kept as reusable prompt/tool text for a future agentic review path.
 FETCH_FILE_TOOL_NAME = "fetch_repo_file"
 # Tool description shown to the model. It fetches the full current contents of a
 # file from the pull request's head commit, so the reviewer can see code the
@@ -482,9 +445,8 @@ def resolve_llm(config, override=None, repo=None):
        config picks Ollama by default but e.g. OpenAI for `owner/repo`;
     3. the default ``config["llm"]``.
 
-    Because n8n bakes the provider (and its credential) into the workflow at
-    build time, this is resolved per built workflow — `build_workflow.py --repo
-    owner/name` selects the mapped provider for that repo's workflow.
+    Resolved fresh on every run from the target repo's config, so a repo changes
+    its review model by editing `.shiva.yml` with nothing to rebuild.
 
     Returns ``{provider, api, endpoint, model, auth, temperature}`` where `api`
     is the wire protocol (a key of `LLM_APIS`) and `auth` a key of `AUTH_SCHEMES`.
@@ -629,93 +591,14 @@ def resolve_exclude(config, override=None):
 
 
 def match_glob(name, pattern):
-    """fnmatch-style wildcard match implemented without any stdlib import.
+    """Case-sensitive fnmatch over the exclude globs.
 
-    Supports the glob syntax the exclude patterns use: ``*`` (any run, including
-    ``/``), ``?`` (one char), and ``[seq]`` / ``[!seq]`` character classes.
-    Case-sensitive and anchored to the whole string, matching ``fnmatch``
-    semantics on POSIX — which is what the n8n Linux Python runner uses.
-
-    Hand-rolled because that runner's sandbox disallows *every* stdlib import
-    ("Allowed stdlib modules: none"), so neither ``fnmatch`` nor ``re`` can be
-    imported inside the generated Code node (task 00017). This function's source
-    is embedded verbatim into the node by scripts/build_workflow.py.
+    ``*`` (any run, including ``/``), ``?`` (one char), and ``[seq]`` /
+    ``[!seq]`` character classes, anchored to the whole string. A thin wrapper
+    over :func:`fnmatch.fnmatchcase` — `fnmatchcase` (not `fnmatch`) so the match
+    stays case-sensitive regardless of the host platform.
     """
-    # Tokenize the pattern once: ("star",) | ("any",) | ("lit", ch)
-    # | ("set", negate, items) where items are chars or (lo, hi) ranges.
-    tokens = []
-    i, n = 0, len(pattern)
-    while i < n:
-        c = pattern[i]
-        if c == "*":
-            tokens.append(("star",))
-            i += 1
-        elif c == "?":
-            tokens.append(("any",))
-            i += 1
-        elif c == "[":
-            j = i + 1
-            negate = False
-            if j < n and pattern[j] in "!^":
-                negate = True
-                j += 1
-            items, first = [], True
-            while j < n and (pattern[j] != "]" or first):
-                first = False
-                if j + 2 < n and pattern[j + 1] == "-" and pattern[j + 2] != "]":
-                    items.append((pattern[j], pattern[j + 2]))
-                    j += 3
-                else:
-                    items.append(pattern[j])
-                    j += 1
-            if j >= n:  # unterminated "[" — treat it as a literal
-                tokens.append(("lit", "["))
-                i += 1
-                continue
-            tokens.append(("set", negate, items))
-            i = j + 1
-        else:
-            tokens.append(("lit", c))
-            i += 1
-
-    def _matches(ch, token):
-        kind = token[0]
-        if kind == "any":
-            return True
-        if kind == "lit":
-            return ch == token[1]
-        _, negate, items = token  # ("set", negate, items)
-        hit = False
-        for it in items:
-            if isinstance(it, tuple):
-                if it[0] <= ch <= it[1]:
-                    hit = True
-                    break
-            elif ch == it:
-                hit = True
-                break
-        return hit != negate
-
-    # Greedy wildcard match with backtracking on the last "*".
-    ti = ni = 0
-    star_ti, star_ni = -1, 0
-    nt, nn = len(tokens), len(name)
-    while ni < nn:
-        if ti < nt and tokens[ti][0] == "star":
-            star_ti, star_ni = ti, ni
-            ti += 1
-        elif ti < nt and tokens[ti][0] != "star" and _matches(name[ni], tokens[ti]):
-            ti += 1
-            ni += 1
-        elif star_ti != -1:
-            ti = star_ti + 1
-            star_ni += 1
-            ni = star_ni
-        else:
-            return False
-    while ti < nt and tokens[ti][0] == "star":
-        ti += 1
-    return ti == nt
+    return fnmatchcase(name, pattern)
 
 
 def filter_files(
@@ -763,8 +646,8 @@ def split_files_into_batches(files, max_batch_chars=DEFAULT_MAX_BATCH_CHARS):
     at DEFAULT_MAX_PATCH_CHARS, so each pass stays bounded.
 
     Returns a list of file-lists. An empty input yields a single empty batch;
-    the generated Code node filters out the no-reviewable-files case before it
-    batches (task 00018), so in practice this is only reached with ≥1 file.
+    the caller filters out the no-reviewable-files case before it batches
+    (task 00018), so in practice this is only reached with ≥1 file.
     """
     batches = []
     current = []
@@ -896,9 +779,9 @@ def build_review_prompt(categories, files, conventions="", part=None):
 def extract_review_text(response, api):
     """Pull the review text from a raw LLM API response, per wire protocol.
 
-    The Python mirror of ``LLMApi.comment_body_expr`` (an n8n expression), used
-    by the gate Code node so the skip decision runs in-process. Returns "" when
-    the shape is unexpected.
+    Pulls the review text out of the provider's response (Anthropic typed
+    `content` blocks vs OpenAI `choices[].message.content`). Returns "" when the
+    shape is unexpected.
     """
     response = response or {}
     if api == "anthropic":

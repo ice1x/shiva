@@ -1,10 +1,8 @@
-"""GitHub Action runtime for the review agent — the n8n-free execution path.
+"""Runtime for the review agent — the GitHub Action and local CLI path.
 
-The original MVP ran the pipeline inside n8n, which meant the review only
-happened while a laptop was awake with `scripts/dev_tunnel.sh` up. This module
-is the same pipeline expressed as plain functions, so it can run on a GitHub
-runner triggered by the target repository's own `pull_request` event: no tunnel,
-no always-on host, no n8n.
+The pipeline expressed as plain functions, so it runs on a GitHub runner
+triggered by the target repository's own `pull_request` event — or by hand from
+`scripts/review_pr.py`: no tunnel, no always-on host, no server.
 
 Everything here is pure — it *describes* HTTP requests and *decides* what to
 post. The actual sockets live in `scripts/review_pr.py`, which keeps this
@@ -36,11 +34,12 @@ PER_PAGE = 100
 # loop if a response ever lies about being full.
 MAX_FILE_PAGES = 30
 
-# Env var the workflow puts the provider key in (see action.yml).
+# Env var the Action puts the provider key in (see action.yml).
 LLM_KEY_ENV = "SHIVA_LLM_API_KEY"
 
-# Hosts that exist only on the operator's machine: reachable from a laptop-run
-# n8n, never from a GitHub runner.
+# Hosts that exist only on the operator's own machine: reachable from a local
+# run, never from a GitHub runner. (host.docker.internal is kept so a model
+# server addressed that way is still caught by the runner guard.)
 LOCAL_HOSTS = ("host.docker.internal", "localhost", "127.0.0.1", "0.0.0.0", "::1")
 
 FOOTER = "\n\n---\n<sub>🕉 Reviewed by [Shiva](https://github.com/ice1x/shiva)%s</sub>"
@@ -110,9 +109,10 @@ def require_runner_reachable(llm, on_runner=True):
     if host in LOCAL_HOSTS:
         raise ActionError(
             f"llm provider {llm.get('provider')!r} points at {endpoint!r}, which a "
-            "GitHub runner cannot reach — it is local to the machine running n8n. "
+            "GitHub runner cannot reach — it is local to the operator's machine. "
             "Set a hosted provider in .shiva.yml (llm.provider: openai | deepseek | "
-            f"anthropic | openrouter) and pass its key as {LLM_KEY_ENV}."
+            f"anthropic | openrouter) and pass its key as {LLM_KEY_ENV}, or run the "
+            "reviewer locally (scripts/review_pr.py) where the local model is reachable."
         )
     return None
 
@@ -146,10 +146,9 @@ def review_passes(
 ):
     """Plan the review: reviewable files, batched, each with its prompt.
 
-    Mirrors what the n8n Code node does — filter (binary/removed/oversized/
-    excluded), pack into size-bounded batches for a large PR, and build one
-    prompt per batch. Returns `[]` when nothing survives filtering, so the caller
-    spends no tokens and posts no noise comment.
+    Filter (binary/removed/oversized/excluded), pack into size-bounded batches
+    for a large PR, and build one prompt per batch. Returns `[]` when nothing
+    survives filtering, so the caller spends no tokens and posts no noise comment.
     """
     kept = filter_files(
         files, max_patch_chars=max_patch_chars, exclude_globs=exclude_globs
@@ -172,10 +171,10 @@ def review_passes(
 def should_skip_event(event):
     """Whether this event must not be reviewed (draft PR, opt-out label, …).
 
-    Defers to `should_skip_pr`, the same gate the n8n workflow uses. On a runner
-    the workflow's own `types:` filter has already decided the event qualifies,
-    and a manually dispatched run carries no `action` at all — so a missing
-    `action` is treated as reviewable, while a present one is still honoured.
+    Defers to `should_skip_pr`. On a runner the workflow's own `types:` filter
+    has already decided the event qualifies, and a manually dispatched run
+    carries no `action` at all — so a missing `action` is treated as reviewable,
+    while a present one is still honoured.
     """
     payload = dict(event or {})
     payload.setdefault("action", "opened")

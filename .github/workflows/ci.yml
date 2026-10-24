@@ -10,9 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 3.10 = requires-python floor: the embedded review.py runs in n8n's
-        # native Python task runner (n8nio/runners image), so it must stay
-        # compatible with older runtimes; 3.14 = current stable.
+        # 3.10 = the requires-python floor declared in pyproject.toml;
+        # 3.14 = current stable. Test on both ends of the supported range.
         python-version: ["3.10", "3.14"]
     steps:
       - uses: actions/checkout@v4
@@ -27,10 +26,3 @@ jobs:
 
       - name: Run tests
         run: pytest -v
-
-      - name: Check generated workflows are up to date
-        run: |
-          python scripts/build_workflow.py
-          python scripts/build_workflow.py --agent
-          git diff --exit-code workflows/pr_review.json workflows/pr_review.agent.json \
-            || { echo "::error::a generated workflow is stale — regenerate with 'python scripts/build_workflow.py [--agent]' and commit the result"; exit 1; }

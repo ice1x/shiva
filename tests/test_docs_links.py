@@ -27,7 +27,7 @@ def test_every_relative_link_resolves(doc):
     assert missing == []
 
 
-def test_the_readme_points_at_both_runtimes():
+def test_the_readme_points_at_the_action_runtime_and_not_the_removed_n8n_docs():
     text = (REPO_ROOT / "README.md").read_text()
     assert "docs/github-action.md" in text
-    assert "docs/n8n.md" in text
+    assert "docs/n8n.md" not in text  # the n8n runtime (and its doc) is gone
