@@ -52,6 +52,8 @@ version: 1
 # should override `endpoint` to use localhost.
 llm:
   provider: ollama            # DEFAULT for every repo not listed below
+  model: qwen2.5-coder:14b    # locally-served Qwen (Ollama); free, no API key
+  endpoint: http://localhost:11434/v1/chat/completions  # native run, not docker
   temperature: 0              # 0 = deterministic, terse, on-topic (0–2)
 
 # Per-repo model mapping. Each key is a GitHub "owner/repo"; its block has the
@@ -62,15 +64,13 @@ llm:
 # provider has one. Because n8n bakes the provider into the workflow, build each
 # listed repo's workflow with `build_workflow.py --repo owner/name`.
 llm_by_repo:
-  ice1x/graphbook:
-    provider: openai
-    model: gpt-4o
-    temperature: 0
-  ice1x/antigram:
-    provider: openai
-    model: gpt-4o
-    temperature: 0
-  # A repo could use a different vendor instead — e.g.:
+  # Empty on purpose: every repo now inherits the local Qwen default above, so
+  # reviews run on the local model for free with no per-repo wiring. Pin a repo
+  # to a different (e.g. hosted) model only when you want one — for example:
+  # ice1x/graphbook:
+  #   provider: openai
+  #   model: gpt-4o
+  #   temperature: 0
   # ice1x/some-repo:
   #   provider: deepseek
   #   model: deepseek-chat

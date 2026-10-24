@@ -63,10 +63,11 @@ def test_empty_when_nothing_set():
 
 
 def test_resolve_provider_reads_config_mapping():
-    # The committed config maps ice1x/graphbook to a hosted model; any other
-    # repo falls back to the default (ollama). Precedence itself is covered by
+    # The committed config pins no repo to a hosted model any more — every repo
+    # inherits the local Qwen (ollama) default — so both a named and an unknown
+    # repo resolve to ollama. Per-repo precedence itself is covered by
     # test_llm_mapping with synthetic configs.
-    assert resolve_llm_provider("ice1x/graphbook") == "openai"
+    assert resolve_llm_provider("ice1x/graphbook") == "ollama"
     assert resolve_llm_provider("ice1x/anything") == "ollama"
 
 

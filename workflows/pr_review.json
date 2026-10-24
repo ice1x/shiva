@@ -122,7 +122,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:11434/v1/chat/completions",
+        "url": "http://localhost:11434/v1/chat/completions",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -134,9 +134,9 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"model\": \"llama3.2\",\n  \"max_tokens\": 16000,\n  \"temperature\": 0,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.prompt) }}\n    }\n  ]\n}"
+        "jsonBody": "={\n  \"model\": \"qwen2.5-coder:14b\",\n  \"max_tokens\": 16000,\n  \"temperature\": 0,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.prompt) }}\n    }\n  ]\n}"
       },
-      "notes": "LLM: ollama (llama3.2). No API key required (ollama is local/keyless)."
+      "notes": "LLM: ollama (qwen2.5-coder:14b). No API key required (ollama is local/keyless)."
     },
     {
       "id": "skip_empty_review",

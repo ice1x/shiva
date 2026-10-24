@@ -337,7 +337,7 @@ def test_default_review_node_is_free_local_ollama(workflow):
     (Ollama) — no vendor lock and no bill for a fresh clone."""
     node = _review_node(workflow)
     assert "11434" in node["parameters"]["url"]  # local Ollama
-    assert "llama3.2" in node["parameters"]["jsonBody"]
+    assert "qwen2.5-coder:14b" in node["parameters"]["jsonBody"]  # local Qwen default
     assert '"adaptive"' not in node["parameters"]["jsonBody"]  # openai schema, no thinking block
     assert "authentication" not in node["parameters"]  # keyless: no credential requested
     # OpenAI response shape is parsed for the comment body

@@ -176,14 +176,14 @@
         "model": {
           "__rl": true,
           "mode": "list",
-          "value": "llama3.2"
+          "value": "qwen2.5-coder:14b"
         },
         "options": {
-          "baseURL": "http://host.docker.internal:11434/v1",
+          "baseURL": "http://localhost:11434/v1",
           "maxTokens": 16000
         }
       },
-      "notes": "LLM: ollama (llama3.2); no API key (ollama is local/keyless)."
+      "notes": "LLM: ollama (qwen2.5-coder:14b); no API key (ollama is local/keyless)."
     },
     {
       "id": "fetch_file_tool",

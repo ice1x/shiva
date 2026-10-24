@@ -156,6 +156,12 @@ def main(argv=None):
         llm = settings["llm"]
         print(f"shiva: reviewing {args.repo} with {llm['provider']}/{llm['model']}")
 
+        # A GitHub runner cannot reach a laptop-local model, so local providers
+        # are rejected there; a developer running this by hand on their own
+        # machine can, so the guard stands down off a runner. GitHub sets
+        # GITHUB_ACTIONS=true only inside a real Actions run.
+        on_runner = os.environ.get("GITHUB_ACTIONS") == "true"
+
         result = run_review(
             event=event,
             repo=args.repo,
@@ -166,6 +172,7 @@ def main(argv=None):
             send=dry_run_send if args.dry_run else http_send,
             conventions=settings["conventions"],
             exclude_globs=settings["exclude_globs"],
+            on_runner=on_runner,
         )
     except ActionError as exc:
         print(f"error: {exc}", file=sys.stderr)
